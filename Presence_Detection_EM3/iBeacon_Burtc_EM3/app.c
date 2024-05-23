@@ -14,8 +14,73 @@
 #include "em_rmu.h"
 #include "em_burtc.h"
 
+#include "em_device.h"
+#include "em_chip.h"
+#include "em_emu.h"
+#include "em_iadc.h"
+#include "em_prs.h"
+
+
+// Use specified PRS channel
+#define IADC_PRS_CH              0
+
+// Set CLK_ADC to 10MHz (this corresponds to a sample rate of 77K with OSR = 32)
+// CLK_SRC_ADC; largest division is by 4
+#define CLK_SRC_ADC_FREQ        20000000
+
+// CLK_ADC; IADC_SCHEDx PRESCALE has 10 valid bits
+#define CLK_ADC_FREQ            10000000
+
+/*
+ * Specify the IADC input using the IADC_PosInput_t typedef.  This
+ * must be paired with a corresponding macro definition that allocates
+ * the corresponding ABUS to the IADC.  These are...
+ *
+ * GPIO->ABUSALLOC |= GPIO_ABUSALLOC_AEVEN0_ADC0
+ * GPIO->ABUSALLOC |= GPIO_ABUSALLOC_AODD0_ADC0
+ * GPIO->BBUSALLOC |= GPIO_BBUSALLOC_BEVEN0_ADC0
+ * GPIO->BBUSALLOC |= GPIO_BBUSALLOC_BODD0_ADC0
+ * GPIO->CDBUSALLOC |= GPIO_CDBUSALLOC_CDEVEN0_ADC0
+ * GPIO->CDBUSALLOC |= GPIO_CDBUSALLOC_CDODD0_ADC0
+ *
+ * ...for port A, port B, and port C/D pins, even and odd, respectively.
+ */
+#define IADC_INPUT_0_PORT_PIN     iadcPosInputPortBPin0;
+
+#define IADC_INPUT_0_BUS          BBUSALLOC
+#define IADC_INPUT_0_BUSALLOC     GPIO_BBUSALLOC_BEVEN0_ADC0
+
+// GPIO output toggle to notify IADC conversion complete
+#define GPIO_OUTPUT_0_PORT        gpioPortA
+#define GPIO_OUTPUT_0_PIN         4
+
+/*******************************************************************************
+***************************   GLOBAL VARIABLES   *******************************
+ ******************************************************************************/
+
+/*
+ * This example enters EM2 in the main while() loop; Setting this #define to 1
+ * enables debug connectivity in EM2, which increases current consumption by
+ * about 0.5uA
+ */
+#define EM2DEBUG                  1
+
+/*******************************************************************************
+ ***************************   GLOBAL VARIABLES   ******************************
+ ******************************************************************************/
+
+// Stores latest ADC sample and converts to volts
+static volatile IADC_Result_t sample;
+static volatile double singleResult;
+
+void my_IADC_enable(IADC_TypeDef *iadc);
+void my_IADC_disable(IADC_TypeDef *iadc);
+void my_IADC_ReadChannel(void);
+
+
+
 // Number of 1 KHz ULFRCO clocks between BURTC interrupts
-#define BURTC_IRQ_PERIOD  60000
+#define BURTC_IRQ_PERIOD  5000
 // Macros.
 #define UINT16_TO_BYTES(n)            ((uint8_t) (n)), ((uint8_t)((n) >> 8))
 #define UINT16_TO_BYTE0(n)            ((uint8_t) (n))
@@ -28,9 +93,15 @@ static uint8_t advertising_set_handle = 0xff;
 
 static uint8_t advertising_set_handle_1 = 0xff;
 
+static uint8_t int_part = 0;
+static uint8_t decimal_part = 0;
+
 volatile bool enter_EM3 = false;
 volatile bool adv_presence = false;
 static uint8_t em2_counter = 0;
+static bool is_capacitor_valtage_enough = false;
+
+
 
 //static app_timer_t app_periodic_timer;
 
@@ -158,6 +229,161 @@ void presenceDetectorPowerOFF(void)
 }
 
 /**************************************************************************//**
+ * @brief  GPIO Initializer
+ *****************************************************************************/
+void configureLED(void)
+{
+  // Configure GPIO as output, will indicate when conversions are being performed
+  GPIO_PinModeSet(GPIO_OUTPUT_0_PORT, GPIO_OUTPUT_0_PIN, gpioModePushPull, 0);
+}
+
+void my_IADC_enable(IADC_TypeDef *iadc)
+{
+  iadc->EN_SET = IADC_EN_EN;
+}
+
+void my_IADC_disable(IADC_TypeDef *iadc)
+{
+#if defined(IADC_STATUS_SYNCBUSY)
+  while ((iadc->STATUS & IADC_STATUS_SYNCBUSY) != 0U) {
+    // Wait for synchronization to finish before disable
+  }
+#endif
+  iadc->EN_CLR = IADC_EN_EN;
+#if defined(_IADC_EN_DISABLING_MASK)
+  while (IADC0->EN & _IADC_EN_DISABLING_MASK) {
+  }
+#endif
+}
+
+void my_IADC_ReadChannel(void)
+{
+  // Initialize the IADC
+  my_IADC_enable(IADC0);
+
+  // Start single
+  IADC_command(IADC0, iadcCmdStartSingle);
+}
+
+/**************************************************************************//**
+ * @brief  IADC Initializer
+ *****************************************************************************/
+void initIADC(void)
+{
+  // Declare init structs
+  IADC_Init_t init = IADC_INIT_DEFAULT;
+  IADC_AllConfigs_t initAllConfigs = IADC_ALLCONFIGS_DEFAULT;
+  IADC_InitSingle_t initSingle = IADC_INITSINGLE_DEFAULT;
+  IADC_SingleInput_t initSingleInput = IADC_SINGLEINPUT_DEFAULT;
+
+  // Enable IADC clock
+  CMU_ClockEnable(cmuClock_IADC0, true);
+
+  // Reset IADC to reset configuration in case it has been modified
+  IADC_reset(IADC0);
+
+  // Configure IADC clock source for use while in EM2
+  CMU_ClockSelectSet(cmuClock_IADCCLK, cmuSelect_FSRCO);
+
+  // Modify init structs and initialize
+  init.warmup = iadcWarmupKeepWarm;
+
+  // Set the HFSCLK prescale value here
+  init.srcClkPrescale = IADC_calcSrcClkPrescale(IADC0, CLK_SRC_ADC_FREQ, 0);
+
+  // Configuration 0 is used by both scan and single conversions by default
+  // Use internal bandgap (supply voltage in mV) as reference
+  initAllConfigs.configs[0].reference = iadcCfgReferenceInt1V2;
+  initAllConfigs.configs[0].vRef = 1210;
+  initAllConfigs.configs[0].analogGain = iadcCfgAnalogGain0P5x;
+
+  // Divides CLK_SRC_ADC to set the CLK_ADC frequency for desired sample rate
+  initAllConfigs.configs[0].adcClkPrescale = IADC_calcAdcClkPrescale(IADC0,
+                                                                    CLK_ADC_FREQ,
+                                                                    0,
+                                                                    iadcCfgModeNormal,
+                                                                    init.srcClkPrescale);
+
+  // Single initialization
+  initSingle.dataValidLevel = iadcFifoCfgDvl1;
+
+  // Set conversions to run continuously
+  initSingle.triggerAction = iadcTriggerActionOnce;
+
+  // Configure Input sources for single ended conversion
+  initSingleInput.posInput = IADC_INPUT_0_PORT_PIN;
+  initSingleInput.negInput = iadcNegInputGnd;
+
+  // Initialize IADC
+  // Note oversampling and digital averaging will affect the offset correction
+  // This is taken care of in the IADC_init() function in the emlib
+  IADC_init(IADC0, &init, &initAllConfigs);
+
+  // Initialize SingleInput
+  IADC_initSingle(IADC0, &initSingle, &initSingleInput);
+
+  // Allocate the analog bus for ADC0 inputs
+  GPIO->IADC_INPUT_0_BUS |= IADC_INPUT_0_BUSALLOC;
+
+  // Enable interrupts on data valid level
+  IADC_enableInt(IADC0, IADC_IEN_SINGLEDONE);
+
+  // Enable ADC interrupts
+  NVIC_ClearPendingIRQ(IADC_IRQn);
+  NVIC_EnableIRQ(IADC_IRQn);
+}
+
+/**************************************************************************//**
+ * @brief  IADC interrupt handler
+ *****************************************************************************/
+void IADC_IRQHandler(void)
+{
+  // Read most recent single conversion result
+  sample = IADC_readSingleResult(IADC0);
+
+  // Calculate input voltage:
+  // For single-ended the result range is 0 to +Vref, i.e.,
+  // for Vref = VBGR = 1.21V, and with analog gain = 0.5,
+  // 12 bits represents 2.42V full scale IADC range.
+  singleResult = sample.data * 2.42 / 0xFFF;
+
+  singleResult = singleResult * 2 ; // To reflect the actual supercap voltage
+
+  IADC_clearInt(IADC0, IADC_IF_SINGLEDONE);
+
+  float float_value = singleResult;
+
+  // Extract the integer part
+  int_part = (uint8_t)float_value;
+
+  // Extract the first digit of the fractional part
+  decimal_part = (uint8_t)((float_value - int_part) * 10);
+
+  // Print the integer values
+  printf("%d.%dV\r\n", int_part, decimal_part);
+
+  printf("***singleResult[%.2lfV], sample.data[%ld]***\r\n", singleResult, sample.data);
+
+  if((singleResult >= 2.5) && (singleResult < 4.2)) // Todo: change to real supercap thresholds
+    {
+      is_capacitor_valtage_enough = true;
+      printf("is_capacitor_valtage_enough value: %d \r\n", is_capacitor_valtage_enough);
+    }
+  else
+    {
+      // Disable the IADC
+      //IADC_reset(IADC0);
+      my_IADC_disable(IADC0);
+      em_mode_2 = false;
+      clear_em2_mode();
+      printf("Voltage NOT within the limit, Enter_EM3 -> portC: %d, SDA: %d, SCL: %d\r\n",
+                 GPIO_PinOutGet(gpioPortC, 3),
+                 GPIO_PinOutGet(gpioPortD, 2),
+                 GPIO_PinOutGet(gpioPortD, 3));
+    }
+}
+
+/**************************************************************************//**
  * @brief  Configure BURTC to interrupt every BURTC_IRQ_PERIOD and
  *         wake from EM4
  *****************************************************************************/
@@ -191,8 +417,8 @@ void BURTC_IRQHandler(void)
   //initGPIO();
 
   BURTC_IntClear(BURTC_IF_COMP); // compare match
-  BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM4 wakeup
-  printf("-- BURTC counter reset \n");
+  BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM3 wakeup
+  printf("-- BURTC counter reset \r\n");
 
   // Enable below two lines if app timer is not used.
   set_em2_mode();
@@ -226,6 +452,7 @@ void app_init(void)
              GPIO_PinOutGet(gpioPortC, 3),
              GPIO_PinOutGet(gpioPortD, 2),
              GPIO_PinOutGet(gpioPortD, 3));
+
   presenceDetectorPowerON();
   reInitialise_I2C();
   setup_I2C_Read_Write();
@@ -247,7 +474,19 @@ void app_init(void)
   app_assert_status(sc);
   // Send first indication.
   app_periodic_timer_cb(&app_periodic_timer, NULL);
-  */
+*/
+  // Initialize GPIO
+  //configureLED();
+
+  // Initialize the IADC
+  initIADC();
+
+#ifdef EM2DEBUG
+#if (EM2DEBUG == 1)
+  // Use for other purpose if needed
+#endif
+#endif
+
 }
 
 /**************************************************************************//**
@@ -257,9 +496,22 @@ SL_WEAK void app_process_action(void)
 {
   if(em_mode_2)
   {
-    em2_counter++;
     if(em2_counter == 1)
     {
+      my_IADC_ReadChannel();
+    }
+    em2_counter++;
+
+    if(is_capacitor_valtage_enough == true)
+    {
+      // Disable the IADC
+      //IADC_reset(IADC0);
+      my_IADC_disable(IADC0);
+      is_capacitor_valtage_enough = false;
+
+      em_mode_2 = false;
+      em2_counter = 0;
+
       if(!GPIO_PinOutGet(gpioPortC, 3)){
           presenceDetectorPowerON();
       }
@@ -273,8 +525,6 @@ SL_WEAK void app_process_action(void)
                                        advertising_set_handle_1,
                                        1);
       adv_presence = true;
-      em_mode_2 = false;
-      em2_counter = 0;
       printf("App_Periodic, Adv_presence : %d -> portC: %d, SDA: %d, SCL: %d\r\n", adv_presence,
                  GPIO_PinOutGet(gpioPortC, 3),
                  GPIO_PinOutGet(gpioPortD, 2),
@@ -324,7 +574,7 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
         //BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM3 wakeup
         clear_em2_mode();
         enter_EM3 = false;
-        printf("lazy_2_Timer (enter_EM4) -> portC: %d, SDA: %d, SCL: %d\r\n",
+        printf("lazy_2_Timer (enter_EM3) -> portC: %d, SDA: %d, SCL: %d\r\n",
                    GPIO_PinOutGet(gpioPortC, 3),
                    GPIO_PinOutGet(gpioPortD, 2),
                    GPIO_PinOutGet(gpioPortD, 3));
@@ -368,14 +618,18 @@ void adv_presence_data(void)
   get_presence(1, &t_presence_raw);
   presenceDetectorPowerOFF();
   disable_I2C();
+  //GPIO_PinModeSet(gpioPortB, 0, gpioModePushPull, 0);
+
 
   if(t_presence_raw != 0)
   {
     printf("T_presence_raw: 0x%x (hex) <-> %d (dec)\r\n", t_presence_raw, t_presence_raw);
     presence_measurement_val_to_buf(t_presence_raw, presence_value);
 
-    bcn_beacon_adv_data.uuid[0] = presence_value[0];
-    bcn_beacon_adv_data.uuid[1] = presence_value[1];
+    bcn_beacon_adv_data.uuid[4] = presence_value[0];
+    bcn_beacon_adv_data.uuid[5] = presence_value[1];
+    bcn_beacon_adv_data.uuid[6] = int_part;
+    bcn_beacon_adv_data.uuid[7] = decimal_part;
 
     /*
      * printf("UINT16_TO_BYTE1: 0x%x, UINT16_TO_BYTE0:  0x%x  ", UINT16_TO_BYTE1(t_presence_raw),
