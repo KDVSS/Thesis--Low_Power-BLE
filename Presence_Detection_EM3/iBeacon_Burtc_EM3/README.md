@@ -1,3 +1,5 @@
+Project – Adaptive Indoor Light Energy Harvesting BLE node.
+
 **Source code changes:**
 1) This project uses the BURTC (Backup Real Time Counter) to wake the device from EM3 mode.
 2) BLE ibeacon packets are used to adverstise presence detection samples, voltage of supercap.
