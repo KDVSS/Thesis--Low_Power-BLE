@@ -90,8 +90,9 @@ static uint8_t decimal_part = 0;
 
 volatile bool enter_EM3 = false;
 volatile bool adv_presence = false;
-static uint8_t em2_counter = 0;
-static bool is_capacitor_valtage_enough = false;
+static bool trigger_IADC_Conversions = false;
+static bool is_capacitor_voltage_enough = false;
+static bool low_voltage = false;
 
 //static app_timer_t app_periodic_timer;
 //static void app_periodic_timer_cb(app_timer_t *timer, void *data);
@@ -232,6 +233,8 @@ void my_IADC_disable(IADC_TypeDef *iadc)
   while (IADC0->EN & _IADC_EN_DISABLING_MASK) {
   }
 #endif
+
+  trigger_IADC_Conversions = false;
 }
 
 void my_IADC_ReadChannel(void)
@@ -285,7 +288,7 @@ void initIADC(void)
   // Single initialization
   initSingle.dataValidLevel = iadcFifoCfgDvl1;
 
-  // Set conversions to run continuously
+  // Set conversions to run only once
   initSingle.triggerAction = iadcTriggerActionOnce;
 
   // Configure Input sources for single ended conversion
@@ -312,6 +315,60 @@ void initIADC(void)
 }
 
 /**************************************************************************//**
+ * @brief  Function to check super capacitor voltage and take action
+ *****************************************************************************/
+void handle_super_capacitor_voltage(double singleResult)
+{
+  // Thresholds for the supercapacitor voltage
+  const float Vmin = 4.30;
+  const float Vmax = 4.42;
+
+  // Check if the voltage is below the minimum threshold
+  if (singleResult < Vmin) {
+      low_voltage = true;
+
+      // Disable the IADC and clear EM2 mode
+      my_IADC_disable(IADC0);
+      em_mode_2 = false;
+      clear_em2_mode();
+
+      printf("Voltage is less than %.2fV, Enter_EM3 -> portC: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
+             Vmin,
+             GPIO_PinOutGet(gpioPortC, 3),
+             GPIO_PinOutGet(gpioPortD, 2),
+             GPIO_PinOutGet(gpioPortD, 3),
+             GPIO_PinOutGet(gpioPortB, 4));
+
+      return;
+  }
+
+  // Check if the voltage was previously low and now is within the valid range
+  if (low_voltage && singleResult >= Vmax) {
+      is_capacitor_voltage_enough = true;
+      low_voltage = false;
+      printf("Super Capacitor voltage is now enough.\r\n");
+  } else if (low_voltage) {
+      // If still in low voltage state, keep disabling IADC and clearing EM2 mode
+      my_IADC_disable(IADC0);
+      em_mode_2 = false;
+      clear_em2_mode();
+
+      printf("Super Capacitor is not fully charged(%0.2fV), Enter_EM3 -> portC: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
+             Vmax,
+             GPIO_PinOutGet(gpioPortC, 3),
+             GPIO_PinOutGet(gpioPortD, 2),
+             GPIO_PinOutGet(gpioPortD, 3),
+             GPIO_PinOutGet(gpioPortB, 4));
+
+      return;
+  }
+
+  // If not low voltage, capacitor voltage is enough
+  is_capacitor_voltage_enough = true;
+
+}
+
+/**************************************************************************//**
  * @brief  IADC interrupt handler
  *****************************************************************************/
 void IADC_IRQHandler(void)
@@ -329,7 +386,7 @@ void IADC_IRQHandler(void)
 
   //printf("1.Voltage_Divider = %.3lf\r\n", singleResult);
 
-  singleResult = singleResult * 1.3; // To reflect the actual supercap voltage
+  singleResult = singleResult * 1.32; // To reflect the actual supercap voltage
 
   //printf("2.Voltage_Divider = %.3lf\r\n", singleResult);
 
@@ -341,35 +398,14 @@ void IADC_IRQHandler(void)
   int_part = (uint8_t)float_value;
 
   // Extract the first digit of the fractional part
-  decimal_part = (uint8_t)((float_value - int_part) * 10);
+  decimal_part = (uint8_t)((float_value - int_part) * 100);
 
   // Print the integer values
   printf("Voltage_Divider = %.3lf, SuperCap Voltage = %d.%dV, "
-           "***singleResult[%.3lfV], sample.data[%ld]***\r\n", singleResult/1.3,
+           "***singleResult[%.3lfV], sample.data[%ld]***\r\n", singleResult/1.32,
            int_part, decimal_part, singleResult, sample.data);
 
-  //printf("***singleResult[%.3lfV], sample.data[%ld]***\r\n", singleResult, sample.data);
-
-  if((singleResult >= 1.8) && (singleResult < 4.45)) // Todo: change to real supercap thresholds
-    {
-      is_capacitor_valtage_enough = true;
-      printf("is_capacitor_valtage_enough value: %d \r\n", is_capacitor_valtage_enough);
-    }
-  else
-    {
-      // Disable the IADC
-      //IADC_reset(IADC0);
-      my_IADC_disable(IADC0);
-      em_mode_2 = false;
-      em2_counter = 0;
-      clear_em2_mode();
-      printf("Voltage NOT within the limit, Enter_EM3 -> portC: %d, SDA: %d, SCL: %d, "
-             "PB4_MOSFET: %d\r\n",
-                 GPIO_PinOutGet(gpioPortC, 3),
-                 GPIO_PinOutGet(gpioPortD, 2),
-                 GPIO_PinOutGet(gpioPortD, 3),
-                 GPIO_PinOutGet(gpioPortB, 4));
-    }
+  handle_super_capacitor_voltage(singleResult);
 }
 
 /**************************************************************************//**
@@ -411,6 +447,7 @@ void BURTC_IRQHandler(void)
   // Enable below two lines if app timer is not used.
   set_em2_mode();
   em_mode_2 = true;
+  trigger_IADC_Conversions = true;
 }
 
 /**************************************************************************//**
@@ -480,21 +517,19 @@ SL_WEAK void app_process_action(void)
 {
   if(em_mode_2)
   {
-    if(em2_counter == 1)
+    if(trigger_IADC_Conversions)
     {
       my_IADC_ReadChannel();
+      trigger_IADC_Conversions = false;
     }
-    em2_counter++;
-
-    if(is_capacitor_valtage_enough == true)
+    if(is_capacitor_voltage_enough == true)
     {
       // Disable the IADC
       //IADC_reset(IADC0);
       my_IADC_disable(IADC0);
-      is_capacitor_valtage_enough = false;
+      is_capacitor_voltage_enough = false;
 
       em_mode_2 = false;
-      em2_counter = 0;
 
       if(!GPIO_PinOutGet(gpioPortC, 3)){
           presenceDetectorPowerON();
