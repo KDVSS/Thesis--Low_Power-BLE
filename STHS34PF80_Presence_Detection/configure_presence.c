@@ -150,7 +150,7 @@ void setup_I2C_Read_Write(void)
  ******************************************************************************/
 void verify_sths34pf80_ID(void)
 {
-  printf("verify_sths34pf80_ID() is enter \r\n");
+  //printf("verify_sths34pf80_ID() is enter \r\n");
 
   /* Prevent buffering of output/input.*/
 #if !defined(__CROSSWORKS_ARM) && defined(__GNUC__)
@@ -203,7 +203,7 @@ void configure_sths34pf80(void)
   printf("%s", bandwidth_lpf);
   memset(bandwidth_lpf, '\0', sizeof(bandwidth_lpf)); */
 
-  printf("Bandwidth of lpf_m: %d, lpf_p: %d, lpf_p_m: %d, lpf_a_t: %d: \r\n\r\n", lpf_m, lpf_p, lpf_p_m, lpf_a_t);
+  printf("Bandwidth of lpf_m: %d, lpf_p: %d, lpf_p_m: %d, lpf_a_t: %d\r\n", lpf_m, lpf_p, lpf_p_m, lpf_a_t);
 
   uint8_t set_bdu = 1;
   sths34pf80_block_data_update_set(&dev_ctx, set_bdu);
@@ -221,7 +221,7 @@ void configure_sths34pf80(void)
 
   /* Set ODR */
   sths34pf80_odr_set(&dev_ctx, STHS34PF80_ODR_AT_30Hz);
-  printf("configure_sths34pf80() EXIT \r\n");
+  //printf("configure_sths34pf80() EXIT \r\n");
 }
 
 void reConfigure_sths34pf80(void)
@@ -244,7 +244,7 @@ void reConfigure_sths34pf80(void)
   printf("%s", bandwidth_lpf);
   memset(bandwidth_lpf, '\0', sizeof(bandwidth_lpf)); */
 
-  printf("Bandwidth of lpf_m: %d, lpf_p: %d, lpf_p_m: %d, lpf_a_t: %d: \r\n\r\n", lpf_m, lpf_p, lpf_p_m, lpf_a_t);
+  printf("Bandwidth of lpf_m: %d, lpf_p: %d, lpf_p_m: %d, lpf_a_t: %d \r\n", lpf_m, lpf_p, lpf_p_m, lpf_a_t);
 
   uint8_t set_bdu = 1;
   sths34pf80_block_data_update_set(&dev_ctx, set_bdu);
@@ -263,7 +263,7 @@ void reConfigure_sths34pf80(void)
 
   /* Set ODR */
   sths34pf80_odr_set(&dev_ctx, STHS34PF80_ODR_AT_30Hz);
-  printf("reConfigure_sths34pf80() EXIT \r\n");
+  //printf("reConfigure_sths34pf80() EXIT \r\n");
 }
 
 void get_presence(int number_of_samples, int16_t *t_presence_raw)
@@ -351,7 +351,7 @@ sl_status_t reInitialise_I2C()
 
 void disable_I2C(void)
 {
-  printf("disable_I2C() Enter\r\n");
+  //printf("disable_I2C() Enter\r\n");
   //I2C_Reset(I2C0);
   I2C_Enable(I2C0, false);
 
@@ -376,5 +376,5 @@ void disable_I2C(void)
   GPIO->P[gpioPortD].MODEL = 0x0;
 */
   CMU_ClockEnable(cmuClock_I2C0, false);
-  printf("disable_I2C() Exit\r\n");
+  //printf("disable_I2C() Exit\r\n");
 }
