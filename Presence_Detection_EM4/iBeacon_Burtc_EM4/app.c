@@ -1,48 +1,78 @@
-/***************************************************************************//**
- * @file
- * @brief Core application logic.
- *******************************************************************************
- * # License
- * <b>Copyright 2020 Silicon Laboratories Inc. www.silabs.com</b>
- *******************************************************************************
- *
- * SPDX-License-Identifier: Zlib
- *
- * The licensor of this software is Silicon Laboratories Inc.
- *
- * This software is provided 'as-is', without any express or implied
- * warranty. In no event will the authors be held liable for any damages
- * arising from the use of this software.
- *
- * Permission is granted to anyone to use this software for any purpose,
- * including commercial applications, and to alter it and redistribute it
- * freely, subject to the following restrictions:
- *
- * 1. The origin of this software must not be misrepresented; you must not
- *    claim that you wrote the original software. If you use this software
- *    in a product, an acknowledgment in the product documentation would be
- *    appreciated but is not required.
- * 2. Altered source versions must be plainly marked as such, and must not be
- *    misrepresented as being the original software.
- * 3. This notice may not be removed or altered from any source distribution.
- *
- ******************************************************************************/
 #include <stdio.h>
 #include <configure_presence.h>
-//#include <burtc_i2c_EM4.h>
 
 #include "sl_bluetooth.h"
 #include "app_assert.h"
 #include "app.h"
+#include "app_timer.h"
+#include "sl_udelay.h"
 
 #include "em_emu.h"
 #include "em_gpio.h"
 #include "em_cmu.h"
 #include "em_rmu.h"
 #include "em_burtc.h"
+#include "em_device.h"
+#include "em_chip.h"
+#include "em_emu.h"
+#include "em_iadc.h"
+
+
+// Set CLK_ADC to 10MHz (this corresponds to a sample rate of 77K with OSR = 32)
+// CLK_SRC_ADC; largest division is by 4
+#define CLK_SRC_ADC_FREQ        20000000
+
+// CLK_ADC; IADC_SCHEDx PRESCALE has 10 valid bits
+#define CLK_ADC_FREQ            10000000
+
+/*
+ * Specify the IADC input using the IADC_PosInput_t typedef.  This
+ * must be paired with a corresponding macro definition that allocates
+ * the corresponding ABUS to the IADC.  These are...
+ *
+ * GPIO->ABUSALLOC |= GPIO_ABUSALLOC_AEVEN0_ADC0
+ * GPIO->ABUSALLOC |= GPIO_ABUSALLOC_AODD0_ADC0
+ * GPIO->BBUSALLOC |= GPIO_BBUSALLOC_BEVEN0_ADC0
+ * GPIO->BBUSALLOC |= GPIO_BBUSALLOC_BODD0_ADC0
+ * GPIO->CDBUSALLOC |= GPIO_CDBUSALLOC_CDEVEN0_ADC0
+ * GPIO->CDBUSALLOC |= GPIO_CDBUSALLOC_CDODD0_ADC0
+ *
+ * ...for port A, port B, and port C/D pins, even and odd, respectively.
+ */
+#define IADC_INPUT_0_PORT_PIN     iadcPosInputPortBPin0;
+
+#define IADC_INPUT_0_BUS          BBUSALLOC
+#define IADC_INPUT_0_BUSALLOC     GPIO_BBUSALLOC_BEVEN0_ADC0
+
+// GPIO output toggle to notify IADC conversion complete
+#define GPIO_OUTPUT_0_PORT        gpioPortA
+#define GPIO_OUTPUT_0_PIN         4
+
+/*******************************************************************************
+***************************   GLOBAL VARIABLES   *******************************
+ ******************************************************************************/
+
+/*
+ * This example enters EM2 in the main while() loop; Setting this #define to 1
+ * enables debug connectivity in EM2, which increases current consumption by
+ * about 0.5uA
+ */
+#define EM2DEBUG                  1
+
+/*******************************************************************************
+ ***************************   GLOBAL VARIABLES   ******************************
+ ******************************************************************************/
+
+// Stores latest ADC sample and converts to volts
+static volatile IADC_Result_t sample;
+static volatile double singleResult;
+
+void my_IADC_enable(IADC_TypeDef *iadc);
+void my_IADC_disable(IADC_TypeDef *iadc);
+void my_IADC_ReadChannel(void);
 
 // Number of 1 KHz ULFRCO clocks between BURTC interrupts
-#define BURTC_IRQ_PERIOD  30000
+#define BURTC_IRQ_PERIOD  5000
 // Macros.
 #define UINT16_TO_BYTES(n)            ((uint8_t) (n)), ((uint8_t)((n) >> 8))
 #define UINT16_TO_BYTE0(n)            ((uint8_t) (n))
@@ -53,9 +83,30 @@
 // The advertising set handle allocated from Bluetooth stack.
 static uint8_t advertising_set_handle = 0xff;
 
+static uint8_t int_part = 0;
+static uint8_t decimal_part = 0;
+
 volatile bool enter_EM4 = false;
 volatile bool adv_presence = false;
+static uint8_t em2_counter = 0;
+static bool is_capacitor_valtage_enough = false;
 
+/*
+#define SL_I2C_RECOVER_NUM_CLOCKS         10
+
+// I2C pins (SCL = PD2; SDA = PD3) //todo: Use portnames and pinnames
+#define I2C_SCL_PORT            gpioPortD
+#define I2C_SCL_PIN             2
+#define I2C_SDA_PORT            gpioPortD
+#define I2C_SDA_PIN             3
+
+*/
+static bool em2_is_enabled = true;
+static bool em_mode_2 = false;
+
+
+void adv_presence_data(void);
+void resetBurtc_and_enterEM4(bool abc);
 
 PACKSTRUCT(static struct {
     uint8_t flags_len;     // Length of the Flags field.
@@ -106,7 +157,7 @@ PACKSTRUCT(static struct {
 
     // A dummy value which will be eventually overwritten
     0
-    };
+};
 
 
 /**************************************************************************//**
@@ -116,12 +167,22 @@ PACKSTRUCT(static struct {
  *****************************************************************************/
 static void bcn_setup_adv_beaconing(void);
 
+/*******************************************************************************
+ * Clear flag and allow power manager to go lower then EM2
+ ******************************************************************************/
+static void clear_em2_mode(void);
+
+/*******************************************************************************
+ * Set flag and power manager to EM2 maximum sleep mode
+ ******************************************************************************/
+static void set_em2_mode(void);
+
 /***************************************************************************//**
  * @brief Enable clocks
  ******************************************************************************/
 void initCMUClocks(void)
 {
-  printf("initCMUClocks() \r\n");
+  //printf("initCMUClocks() \r\n");
   // Disable clocks to the GPIO
   CMU_ClockEnable(cmuClock_GPIO, true);
 }
@@ -154,22 +215,151 @@ void presenceDetectorPowerOFF(void)
   GPIO_PinModeSet(gpioPortC, 3, gpioModePushPull, 0);
 }
 
-/**************************************************************************//**
- * @brief  BURTC Handler
- *****************************************************************************/
-void BURTC_IRQHandler(void)
+void my_IADC_enable(IADC_TypeDef *iadc)
 {
-  printf("BURTC_IRQHandler() ");
-  BURTC_IntClear(BURTC_IF_COMP); // compare match
-  BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM4 wakeup
+  iadc->EN_SET = IADC_EN_EN;
+}
+
+void my_IADC_disable(IADC_TypeDef *iadc)
+{
+#if defined(IADC_STATUS_SYNCBUSY)
+  while ((iadc->STATUS & IADC_STATUS_SYNCBUSY) != 0U) {
+    // Wait for synchronization to finish before disable
+  }
+#endif
+  iadc->EN_CLR = IADC_EN_EN;
+#if defined(_IADC_EN_DISABLING_MASK)
+  while (IADC0->EN & _IADC_EN_DISABLING_MASK) {
+  }
+#endif
+}
+
+void my_IADC_ReadChannel(void)
+{
+  // Initialize the IADC
+  my_IADC_enable(IADC0);
+
+  // Start single
+  IADC_command(IADC0, iadcCmdStartSingle);
 }
 
 /**************************************************************************//**
- * @brief  Initialize GPIOs for push button and LED
+ * @brief  IADC Initializer
  *****************************************************************************/
-void initGPIO(void)
+void initIADC(void)
 {
-  //GPIO_PinModeSet(gpioPortC, 3, gpioModePushPull, 1);
+  // Declare init structs
+  IADC_Init_t init = IADC_INIT_DEFAULT;
+  IADC_AllConfigs_t initAllConfigs = IADC_ALLCONFIGS_DEFAULT;
+  IADC_InitSingle_t initSingle = IADC_INITSINGLE_DEFAULT;
+  IADC_SingleInput_t initSingleInput = IADC_SINGLEINPUT_DEFAULT;
+
+  // Enable IADC clock
+  CMU_ClockEnable(cmuClock_IADC0, true);
+
+  // Reset IADC to reset configuration in case it has been modified
+  IADC_reset(IADC0);
+
+  // Configure IADC clock source for use while in EM2
+  CMU_ClockSelectSet(cmuClock_IADCCLK, cmuSelect_FSRCO);
+
+  // Modify init structs and initialize
+  init.warmup = iadcWarmupKeepWarm;
+
+  // Set the HFSCLK prescale value here
+  init.srcClkPrescale = IADC_calcSrcClkPrescale(IADC0, CLK_SRC_ADC_FREQ, 0);
+
+  // Configuration 0 is used by both scan and single conversions by default
+  // Use internal bandgap (supply voltage in mV) as reference
+  initAllConfigs.configs[0].reference = iadcCfgReferenceInt1V2;
+  initAllConfigs.configs[0].vRef = 1210;
+  initAllConfigs.configs[0].analogGain = iadcCfgAnalogGain0P5x;
+
+  // Divides CLK_SRC_ADC to set the CLK_ADC frequency for desired sample rate
+  initAllConfigs.configs[0].adcClkPrescale = IADC_calcAdcClkPrescale(IADC0,
+                                                                    CLK_ADC_FREQ,
+                                                                    0,
+                                                                    iadcCfgModeNormal,
+                                                                    init.srcClkPrescale);
+
+  // Single initialization
+  initSingle.dataValidLevel = iadcFifoCfgDvl1;
+
+  // Set conversions to run continuously
+  initSingle.triggerAction = iadcTriggerActionOnce;
+
+  // Configure Input sources for single ended conversion
+  initSingleInput.posInput = IADC_INPUT_0_PORT_PIN;
+  initSingleInput.negInput = iadcNegInputGnd;
+
+  // Initialize IADC
+  // Note oversampling and digital averaging will affect the offset correction
+  // This is taken care of in the IADC_init() function in the emlib
+  IADC_init(IADC0, &init, &initAllConfigs);
+
+  // Initialize SingleInput
+  IADC_initSingle(IADC0, &initSingle, &initSingleInput);
+
+  // Allocate the analog bus for ADC0 inputs
+  GPIO->IADC_INPUT_0_BUS |= IADC_INPUT_0_BUSALLOC;
+
+  // Enable interrupts on data valid level
+  IADC_enableInt(IADC0, IADC_IEN_SINGLEDONE);
+
+  // Enable ADC interrupts
+  NVIC_ClearPendingIRQ(IADC_IRQn);
+  NVIC_EnableIRQ(IADC_IRQn);
+}
+
+/**************************************************************************//**
+ * @brief  IADC interrupt handler
+ *****************************************************************************/
+void IADC_IRQHandler(void)
+{
+  // Read most recent single conversion result
+  sample = IADC_readSingleResult(IADC0);
+
+  // Calculate input voltage:
+  // For single-ended the result range is 0 to +Vref, i.e.,
+  // for Vref = VBGR = 1.21V, and with analog gain = 0.5,
+  // 12 bits represents 2.42V full scale IADC range.
+  singleResult = sample.data * 2.42 / 0xFFF;
+
+  singleResult = singleResult * 2 ; // To reflect the actual supercap voltage
+
+  IADC_clearInt(IADC0, IADC_IF_SINGLEDONE);
+
+  float float_value = singleResult;
+
+  // Extract the integer part
+  int_part = (uint8_t)float_value;
+
+  // Extract the first digit of the fractional part
+  decimal_part = (uint8_t)((float_value - int_part) * 10);
+
+  // Print the integer values
+  printf("%d.%dV\r\n", int_part, decimal_part);
+
+  printf("***singleResult[%.2lfV], sample.data[%ld]***\r\n", singleResult, sample.data);
+
+  if((singleResult >= 3.9) && (singleResult < 4.4)) // Todo: change to real supercap thresholds
+    {
+      is_capacitor_valtage_enough = true;
+      printf("is_capacitor_valtage_enough value: %d \r\n", is_capacitor_valtage_enough);
+    }
+  else
+    {
+      // Disable the IADC
+      //IADC_reset(IADC0);
+      my_IADC_disable(IADC0);
+      em_mode_2 = false;
+      clear_em2_mode();
+      printf("Voltage NOT within the limit, Enter_EM4 -> portC: %d, SDA: %d, SCL: %d\r\n",
+                 GPIO_PinOutGet(gpioPortC, 3),
+                 GPIO_PinOutGet(gpioPortD, 2),
+                 GPIO_PinOutGet(gpioPortD, 3));
+      resetBurtc_and_enterEM4(true);
+    }
 }
 
 /**************************************************************************//**
@@ -196,6 +386,17 @@ void initBURTC(void)
 }
 
 /**************************************************************************//**
+ * @brief  BURTC Handler
+ *****************************************************************************/
+void BURTC_IRQHandler(void)
+{
+  printf("\r\nBURTC_IRQHandler()\n");
+  BURTC_IntClear(BURTC_IF_COMP); // compare match
+  BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM4 wakeup
+  printf("-- BURTC counter reset \r\n");
+}
+
+/**************************************************************************//**
  * @brief Check RSTCAUSE for EM4 wakeups (reset) and save wakeup count
  *          to BURAM
  *****************************************************************************/
@@ -208,27 +409,30 @@ void checkResetCause (void)
   // Print reset cause
   if (cause & EMU_RSTCAUSE_PIN)
   {
-    printf("-- RSTCAUSE = PIN \n");
+    //printf("-- RSTCAUSE = PIN \n");
     BURAM->RET[0].REG = 0; // reset EM4 wakeup counter
   }
   else if (cause & EMU_RSTCAUSE_EM4)
   {
-    printf("-- RSTCAUSE = EM4 wakeup \n");
+    //printf("-- RSTCAUSE = EM4 wakeup \n");
     BURAM->RET[0].REG += 1; // increment EM4 wakeup counter
+
   }
   // Print # of EM4 wakeups
-  printf("-- Number of EM4 wakeups = %ld \n", BURAM->RET[0].REG);
+  printf("--Number of EM4 wakeups = %ld \n", BURAM->RET[0].REG);
   //printf("-- BURTC ISR will toggle LED every ~3 seconds \n");
 }
 
-void resetBurtc_and_enterEM4(void)
+void resetBurtc_and_enterEM4(bool abc)
 {
-  //BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM4 wakeup
-  //printf("-- BURTC counter reset \n");
-
+  if(abc)
+   {
+      BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM4 wakeup
+      printf("-- BURTC counter reset \n");
+   }
   // Enter EM4
-  printf("Entering EM4 and wake on BURTC compare in ~5 seconds \n\n");
-  //RETARGET_SerialFlush(); // delay for printf to finish
+  printf("Entering EM4 and wake on BURTC compare in ~5 seconds \r\n");
+  // RETARGET_SerialFlush(); // delay for printf to finish
   EMU_EnterEM4();
 }
 
@@ -239,7 +443,8 @@ void app_init(void)
 {
   EMU_UnlatchPinRetention();
 
-  initBURTC();
+  set_em2_mode();
+  em_mode_2 = true;
 
 /*
   // Enable the below lines only if EM4 is running on empty project. Otherwise
@@ -247,19 +452,62 @@ void app_init(void)
   EMU_EM4Init_TypeDef em4Init = EMU_EM4INIT_DEFAULT;
   EMU_EM4Init(&em4Init);
 */
-
   // Check RESETCAUSE, update and print EM4 wakeup count
-  checkResetCause();
+  //checkResetCause();
 
-  printf("\r\nIn EM0 \r\n");
+  printf("\r\nIn EM0\r\n");
   initCMUClocks();
-  presenceDetectorPowerON();
 
-  reInitialise_I2C();
-  setup_I2C_Read_Write();
-  verify_sths34pf80_ID();
-  configure_sths34pf80();
+  initBURTC();
 
+  // Initialize the IADC
+  initIADC();
+
+}
+
+/**************************************************************************//**
+ * Application Process Action.
+ *****************************************************************************/
+SL_WEAK void app_process_action(void)
+{
+  if(em_mode_2)
+    {
+      if(em2_counter == 1)
+      {
+        my_IADC_ReadChannel();
+      }
+      em2_counter++;
+
+      if(is_capacitor_valtage_enough == true)
+      {
+        // Disable the IADC
+        //IADC_reset(IADC0);
+        my_IADC_disable(IADC0);
+        is_capacitor_valtage_enough = false;
+
+        em_mode_2 = false;
+        em2_counter = 0;
+
+        if(!GPIO_PinOutGet(gpioPortC, 3)){
+            presenceDetectorPowerON();
+        }
+        reInitialise_I2C();
+        setup_I2C_Read_Write();
+        verify_sths34pf80_ID();
+        configure_sths34pf80();
+
+        //1 Millisecond = 32.768, 500millsecond = 32.768*500 = 16384
+        sl_bt_system_set_lazy_soft_timer(16384,
+                                         0,
+                                         advertising_set_handle,
+                                         1);
+        adv_presence = true;
+        printf("App_Periodic, Adv_presence : %d -> portC: %d, SDA: %d, SCL: %d\r\n", adv_presence,
+                   GPIO_PinOutGet(gpioPortC, 3),
+                   GPIO_PinOutGet(gpioPortD, 2),
+                   GPIO_PinOutGet(gpioPortD, 3));
+      }
+    }
 }
 
 static void presence_measurement_val_to_buf(int16_t value,
@@ -294,8 +542,10 @@ void adv_presence_data(void)
     printf("T_presence_raw: 0x%x (hex) <-> %d (dec)\r\n", t_presence_raw, t_presence_raw);
     presence_measurement_val_to_buf(t_presence_raw, presence_value);
 
-    bcn_beacon_adv_data.uuid[0] = presence_value[0];
-    bcn_beacon_adv_data.uuid[1] = presence_value[1];
+    bcn_beacon_adv_data.uuid[4] = presence_value[0];
+    bcn_beacon_adv_data.uuid[5] = presence_value[1];
+    bcn_beacon_adv_data.uuid[6] = int_part;
+    bcn_beacon_adv_data.uuid[7] = decimal_part;
 
     /*
      * printf("UINT16_TO_BYTE1: 0x%x, UINT16_TO_BYTE0:  0x%x  ", UINT16_TO_BYTE1(t_presence_raw),
@@ -325,14 +575,6 @@ void adv_presence_data(void)
                                    1);
 }
 
-
-/**************************************************************************//**
- * Application Process Action.
- *****************************************************************************/
-SL_WEAK void app_process_action(void)
-{
-
-}
 /**************************************************************************//**
  * Bluetooth stack event handler.
  * This overrides the dummy weak implementation.
@@ -354,32 +596,14 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       app_assert_status(sc);
       (void)ret_power_min;
       (void)ret_power_max;
+
       // Initialize iBeacon ADV data.
       bcn_setup_adv_beaconing();
-
-      //1 Millisecond = 32.768, 500millsecond = 32.768*500 = 16384
-      sl_bt_system_set_lazy_soft_timer(16384,
-                                       0,
-                                       advertising_set_handle,
-                                       1);
-      adv_presence = true;
-
       break;
 
     case sl_bt_evt_system_soft_timer_id:
-      printf("sl_bt_evt_system_soft_timer_id is expired \r\n");
+      //printf("sl_bt_evt_system_soft_timer_id is expired \r\n");
 
-      if(enter_EM4)
-      {
-        /*sc = sl_bt_advertiser_stop(advertising_set_handle);
-        app_assert_status(sc); */
-        printf("lazy_2_Timer (enter_EM4) -> portC: %d, SDA: %d, SCL: %d\r\n",
-                   GPIO_PinOutGet(gpioPortC, 3),
-                   GPIO_PinOutGet(gpioPortD, 2),
-                   GPIO_PinOutGet(gpioPortD, 3));
-        resetBurtc_and_enterEM4();
-        enter_EM4 = false;
-      }
       if(adv_presence)
       {
         printf("lazy_1_Timer (adv_presence) -> portC: %d, SDA: %d, SCL: %d\r\n",
@@ -388,6 +612,18 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
                    GPIO_PinOutGet(gpioPortD, 3));
         adv_presence_data();
         adv_presence = false;
+      }
+      if(enter_EM4)
+      {
+        /*sc = sl_bt_advertiser_stop(advertising_set_handle);
+        app_assert_status(sc); */
+        printf("lazy_2_Timer (enter_EM4) -> portC: %d, SDA: %d, SCL: %d\r\n",
+                   GPIO_PinOutGet(gpioPortC, 3),
+                   GPIO_PinOutGet(gpioPortD, 2),
+                   GPIO_PinOutGet(gpioPortD, 3));
+        clear_em2_mode();
+        resetBurtc_and_enterEM4(false);
+        enter_EM4 = false;
       }
       break;
 
@@ -450,4 +686,28 @@ static void bcn_setup_adv_beaconing(void)
   // sc = sl_bt_legacy_advertiser_start(advertising_set_handle,
                                     // sl_bt_legacy_advertiser_non_connectable);
   app_assert_status(sc);
+}
+
+/*******************************************************************************
+ * Set flag and power manager to EM2 maximum sleep mode
+ ******************************************************************************/
+static void set_em2_mode(void)
+{
+  if (!em2_is_enabled) {
+    em2_is_enabled = true;
+    sl_power_manager_add_em_requirement(SL_POWER_MANAGER_EM2);
+    printf("SL_POWER_MANAGER_EM2 requirement added \r\n");
+  }
+}
+
+/*******************************************************************************
+ * Clear flag and allow power manager to go lower then EM2
+ ******************************************************************************/
+static void clear_em2_mode(void)
+{
+  if (em2_is_enabled) {
+    em2_is_enabled = false;
+    sl_power_manager_remove_em_requirement(SL_POWER_MANAGER_EM2);
+    printf("SL_POWER_MANAGER_EM2 requirement removed \r\n");
+  }
 }
