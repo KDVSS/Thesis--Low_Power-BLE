@@ -48,7 +48,6 @@
  * ...for port A, port B, and port C/D pins, even and odd, respectively.
  */
 #define IADC_INPUT_0_PORT_PIN     iadcPosInputPortBPin0;
-
 #define IADC_INPUT_0_BUS          BBUSALLOC
 #define IADC_INPUT_0_BUSALLOC     GPIO_BBUSALLOC_BEVEN0_ADC0
 
@@ -336,7 +335,8 @@ void handle_super_capacitor_voltage(double singleResult)
       em_mode_2 = false;
       clear_em2_mode();
 
-      printf("Voltage is less than %.2fV, Enter_EM3 -> PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
+      printf("Voltage is less than %.2fV, Enter_EM3 -> "
+             "PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
              Vmin,
              GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
              GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
@@ -359,7 +359,8 @@ void handle_super_capacitor_voltage(double singleResult)
       em_mode_2 = false;
       clear_em2_mode();
 
-      printf("Super Capacitor is not fully charged(%0.2fV), Enter_EM3 -> PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
+      printf("Super Capacitor is not fully charged(%0.2fV), Enter_EM3 -> "
+             "PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
              Vmax,
              GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
              GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
@@ -550,12 +551,13 @@ SL_WEAK void app_process_action(void)
                                        advertising_set_handle_1,
                                        1);
       adv_presence = true;
-      printf("App_Periodic, Adv_presence : %d -> PC3_Presence: %d, SDA: %d, SCL: %d, "
-             "PB4_MOSFET: %d\r\n", adv_presence,
-                 GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
-                 GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
-                 GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
-                 GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
+      printf("App_Periodic, Adv_presence : %d -> "
+             "PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
+             adv_presence,
+             GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
+             GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
+             GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
+             GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
     }
   }
 }
