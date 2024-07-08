@@ -24,8 +24,6 @@
 // CLK_ADC; IADC_SCHEDx PRESCALE has 10 valid bits
 #define CLK_ADC_FREQ            10000000
 
-// Number of 1 KHz ULFRCO clocks between BURTC interrupts
-#define BURTC_IRQ_PERIOD  5000
 // Macros.
 #define UINT16_TO_BYTES(n)            ((uint8_t) (n)), ((uint8_t)((n) >> 8))
 #define UINT16_TO_BYTE0(n)            ((uint8_t) (n))
@@ -75,6 +73,9 @@
 /*******************************************************************************
  ***************************   GLOBAL VARIABLES   ******************************
  ******************************************************************************/
+
+// Number of 1 KHz ULFRCO clocks between BURTC interrupts
+static uint32_t burtc_irq_period = 5000;
 
 // Stores latest ADC sample and converts to volts
 static volatile IADC_Result_t sample;
@@ -305,6 +306,8 @@ void initIADC(void)
  *****************************************************************************/
 void change_burtc_compare_value(uint32_t burtc_counter)
 {
+  //printf("change_burtc_compare_value()\r\n");
+
   BURTC_IntDisable(BURTC_IEN_COMP); // Disable the compare interrupt
   BURTC_IntClear(BURTC_IF_COMP);    // clear any pending interrupt flags
 
@@ -317,9 +320,11 @@ void change_burtc_compare_value(uint32_t burtc_counter)
  *****************************************************************************/
 void handle_super_capacitor_voltage(double singleResult)
 {
+  //printf("handle_super_capacitor_voltage()\r\n");
+
   // Thresholds for the super capacitor voltage
-  const float Vmin = 3.90;
-  const float Vmax = 4.10;
+  const float Vmin = 4.25;
+  const float Vmax = 4.70;
 
   // Check if the voltage is below the minimum threshold
   if (singleResult <= Vmin) {
@@ -338,9 +343,9 @@ void handle_super_capacitor_voltage(double singleResult)
              GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
              GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
 
+      burtc_irq_period = 60000;
+      change_burtc_compare_value(burtc_irq_period);
       resetBurtc_and_enterEM4(true);
-      change_burtc_compare_value(60000);
-
       return;
   }
 
@@ -364,11 +369,11 @@ void handle_super_capacitor_voltage(double singleResult)
              GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
 
       resetBurtc_and_enterEM4(true);
-
       return;
   }
   if(singleResult >= Vmax){
-      change_burtc_compare_value(BURTC_IRQ_PERIOD);
+      burtc_irq_period = 5000;
+      change_burtc_compare_value(burtc_irq_period);
   }
   // If not low voltage, capacitor voltage is enough
   is_capacitor_voltage_enough = true;
@@ -432,7 +437,7 @@ void initBURTC(void)
   BURTC_Init(&burtcInit);
 
   BURTC_CounterReset();
-  BURTC_CompareSet(0, BURTC_IRQ_PERIOD);
+  BURTC_CompareSet(0, burtc_irq_period);
 
   BURTC_IntEnable(BURTC_IEN_COMP);    // Enable the compare interrupt
   NVIC_EnableIRQ(BURTC_IRQn);
@@ -446,7 +451,7 @@ void BURTC_IRQHandler(void)
 {
   //printf("\r\nBURTC_IRQHandler()\n");
   BURTC_IntClear(BURTC_IF_COMP); // clear any pending interrupt flags
-  BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM4 wakeup
+  BURTC_CounterReset(); // reset BURTC counter to wait burtc_irq_period sec before EM4 wakeup
   //printf("-- BURTC counter reset \r\n");
 }
 
@@ -474,7 +479,6 @@ void checkResetCause (void)
   }
   // Print # of EM4 wakeups
   printf("--Number of EM4 wakeups = %ld \n", BURAM->RET[0].REG);
-  //printf("-- BURTC ISR will toggle LED every ~3 seconds \n");
 }
 
 void resetBurtc_and_enterEM4(bool reset_burtc_counter)
@@ -482,10 +486,10 @@ void resetBurtc_and_enterEM4(bool reset_burtc_counter)
   if(reset_burtc_counter)
    {
       BURTC_CounterReset();
-      //printf("Reset BURTC counter to wait full ~5 sec before EM4 wakeup \n");
+      //printf("Reset BURTC counter to wait full %ld sec before EM4 wakeup \n", burtc_irq_period/1000);
    }
   // Enter EM4
-  printf("Entering EM4 and wake on BURTC compare in ~5 seconds \r\n\r\n");
+  printf("Entering EM4 and wake on BURTC compare in %ld seconds \r\n\r\n", burtc_irq_period/1000);
   //RETARGET_SerialFlush(); // delay for printf to finish
   EMU_EnterEM4();
 }
@@ -495,6 +499,7 @@ void resetBurtc_and_enterEM4(bool reset_burtc_counter)
  ******************************************************************************/
 void app_init(void)
 {
+  //printf("app init()\r\n");
   EMU_UnlatchPinRetention();
 
   set_em2_mode();
