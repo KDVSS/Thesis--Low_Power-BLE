@@ -24,6 +24,15 @@
 // CLK_ADC; IADC_SCHEDx PRESCALE has 10 valid bits
 #define CLK_ADC_FREQ            10000000
 
+// Number of 1 KHz ULFRCO clocks between BURTC interrupts
+#define BURTC_IRQ_PERIOD  5000
+// Macros.
+#define UINT16_TO_BYTES(n)            ((uint8_t) (n)), ((uint8_t)((n) >> 8))
+#define UINT16_TO_BYTE0(n)            ((uint8_t) (n))
+#define UINT16_TO_BYTE1(n)            ((uint8_t) ((n) >> 8))
+
+#define SIGNAL_LOSS_AT_1_M_IN_DBM     41 // The beacon's measured RSSI at 1 m
+
 /*
  * Specify the IADC input using the IADC_PosInput_t typedef.  This
  * must be paired with a corresponding macro definition that allocates
@@ -47,9 +56,15 @@
 #define GPIO_OUTPUT_0_PORT        gpioPortA
 #define GPIO_OUTPUT_0_PIN         4
 
-/*******************************************************************************
-***************************   GLOBAL VARIABLES   *******************************
- ******************************************************************************/
+// I2C pins (SCL = PD2; SDA = PD3)
+#define I2C_SCL_PORT              gpioPortD
+#define I2C_SCL_PIN               2
+#define I2C_SDA_PORT              gpioPortD
+#define I2C_SDA_PIN               3
+#define PRESENCE_DETECTOR_PORT    gpioPortC
+#define PRESENCE_DETECTOR_PIN     3
+#define PN_MOSFET_PORT            gpioPortB
+#define PN_MOSFET_PIN             4
 
 /*
  * This example enters EM2 in the main while() loop; Setting this #define to 1
@@ -61,53 +76,30 @@
 /*******************************************************************************
  ***************************   GLOBAL VARIABLES   ******************************
  ******************************************************************************/
-
 // Stores latest ADC sample and converts to volts
 static volatile IADC_Result_t sample;
 static volatile double singleResult;
 
-void my_IADC_enable(IADC_TypeDef *iadc);
-void my_IADC_disable(IADC_TypeDef *iadc);
-void my_IADC_ReadChannel(void);
-
-// Number of 1 KHz ULFRCO clocks between BURTC interrupts
-#define BURTC_IRQ_PERIOD  5000
-// Macros.
-#define UINT16_TO_BYTES(n)            ((uint8_t) (n)), ((uint8_t)((n) >> 8))
-#define UINT16_TO_BYTE0(n)            ((uint8_t) (n))
-#define UINT16_TO_BYTE1(n)            ((uint8_t) ((n) >> 8))
-
-#define SIGNAL_LOSS_AT_1_M_IN_DBM     41 // The beacon's measured RSSI at 1 m
-
 // The advertising set handle allocated from Bluetooth stack.
 static uint8_t advertising_set_handle = 0xff;
-
 static uint8_t advertising_set_handle_1 = 0xff;
-
 static uint8_t int_part = 0;
 static uint8_t decimal_part = 0;
 
-
-volatile bool enter_EM3 = false;
-volatile bool adv_presence = false;
+static bool enter_EM3 = false;
+static bool adv_presence = false;
 static bool trigger_IADC_Conversions = false;
 static bool is_capacitor_voltage_enough = false;
 static bool low_voltage = false;
+static bool em2_is_enabled = true;
+static bool em_mode_2 = false;
 
 //static app_timer_t app_periodic_timer;
 //static void app_periodic_timer_cb(app_timer_t *timer, void *data);
 
-#define SL_I2C_RECOVER_NUM_CLOCKS         10
-
-// I2C pins (SCL = PD2; SDA = PD3) //todo: Use portnames and pinnames
-#define I2C_SCL_PORT            gpioPortD
-#define I2C_SCL_PIN             2
-#define I2C_SDA_PORT            gpioPortD
-#define I2C_SDA_PIN             3
-
-static bool em2_is_enabled = true;
-static bool em_mode_2 = false;
-
+void my_IADC_enable(IADC_TypeDef *iadc);
+void my_IADC_disable(IADC_TypeDef *iadc);
+void my_IADC_ReadChannel(void);
 void adv_presence_data(void);
 
 PACKSTRUCT(static struct {
@@ -204,7 +196,7 @@ void deInitCMUClocks(void)
 void presenceDetectorPowerON(void)
 {
   //printf("presenceDetectorPowerON()\r\n");
-  GPIO_PinModeSet(gpioPortC, 3, gpioModePushPull, 1);
+  GPIO_PinModeSet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN, gpioModePushPull, 1);
 }
 
 /**************************************************************************//**
@@ -213,7 +205,7 @@ void presenceDetectorPowerON(void)
 void presenceDetectorPowerOFF(void)
 {
   //printf("presenceDetectorPowerOFF()\r\n");
-  GPIO_PinModeSet(gpioPortC, 3, gpioModePushPull, 0);
+  GPIO_PinModeSet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN, gpioModePushPull, 0);
 }
 
 void my_IADC_enable(IADC_TypeDef *iadc)
@@ -315,16 +307,28 @@ void initIADC(void)
 }
 
 /**************************************************************************//**
+ * @brief  Function to change burtc compare value
+ *****************************************************************************/
+void change_burtc_compare_value(uint32_t burtc_counter)
+{
+  BURTC_IntDisable(BURTC_IEN_COMP); // Disable the compare interrupt
+  BURTC_IntClear(BURTC_IF_COMP);    // clear any pending interrupt flags
+
+  BURTC_CompareSet(0, burtc_counter);
+  BURTC_IntEnable(BURTC_IEN_COMP);  // Re-enable the compare interrupt
+}
+
+/**************************************************************************//**
  * @brief  Function to check super capacitor voltage and take action
  *****************************************************************************/
 void handle_super_capacitor_voltage(double singleResult)
 {
-  // Thresholds for the supercapacitor voltage
-  const float Vmin = 4.30;
-  const float Vmax = 4.42;
+  // Thresholds for the super capacitor voltage
+  const float Vmin = 4.42;
+  const float Vmax = 4.47;
 
   // Check if the voltage is below the minimum threshold
-  if (singleResult < Vmin) {
+  if (singleResult <= Vmin) {
       low_voltage = true;
 
       // Disable the IADC and clear EM2 mode
@@ -332,12 +336,14 @@ void handle_super_capacitor_voltage(double singleResult)
       em_mode_2 = false;
       clear_em2_mode();
 
-      printf("Voltage is less than %.2fV, Enter_EM3 -> portC: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
+      printf("Voltage is less than %.2fV, Enter_EM3 -> PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
              Vmin,
-             GPIO_PinOutGet(gpioPortC, 3),
-             GPIO_PinOutGet(gpioPortD, 2),
-             GPIO_PinOutGet(gpioPortD, 3),
-             GPIO_PinOutGet(gpioPortB, 4));
+             GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
+             GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
+             GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
+             GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
+
+      change_burtc_compare_value(60000);
 
       return;
   }
@@ -353,19 +359,20 @@ void handle_super_capacitor_voltage(double singleResult)
       em_mode_2 = false;
       clear_em2_mode();
 
-      printf("Super Capacitor is not fully charged(%0.2fV), Enter_EM3 -> portC: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
+      printf("Super Capacitor is not fully charged(%0.2fV), Enter_EM3 -> PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
              Vmax,
-             GPIO_PinOutGet(gpioPortC, 3),
-             GPIO_PinOutGet(gpioPortD, 2),
-             GPIO_PinOutGet(gpioPortD, 3),
-             GPIO_PinOutGet(gpioPortB, 4));
+             GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
+             GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
+             GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
+             GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
 
       return;
   }
-
+  if(singleResult >= Vmax){
+      change_burtc_compare_value(BURTC_IRQ_PERIOD);
+  }
   // If not low voltage, capacitor voltage is enough
   is_capacitor_voltage_enough = true;
-
 }
 
 /**************************************************************************//**
@@ -426,7 +433,7 @@ void initBURTC(void)
   BURTC_CounterReset();
   BURTC_CompareSet(0, BURTC_IRQ_PERIOD);
 
-  BURTC_IntEnable(BURTC_IEN_COMP);    // compare match
+  BURTC_IntEnable(BURTC_IEN_COMP);    // Enable the compare interrupt
   NVIC_EnableIRQ(BURTC_IRQn);
   BURTC_Enable(true);
 }
@@ -440,7 +447,7 @@ void BURTC_IRQHandler(void)
   //sl_udelay_wait(100000);
   //initGPIO();
 
-  BURTC_IntClear(BURTC_IF_COMP); // compare match
+  BURTC_IntClear(BURTC_IF_COMP); // clear any pending interrupt flags
   BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM3 wakeup
   //printf("-- BURTC counter reset \r\n");
 
@@ -482,14 +489,14 @@ void app_init(void)
 
   setup_I2C_Read_Write();
 
-  GPIO_PinModeSet(gpioPortB, 4, gpioModePushPull, 0);
-  GPIO_PinOutSet(gpioPortB, 4);
-  //GPIO_PinOutClear(gpioPortB, 4);
-  printf("AppInt -> portC: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
-             GPIO_PinOutGet(gpioPortC, 3),
-             GPIO_PinOutGet(gpioPortD, 2),
-             GPIO_PinOutGet(gpioPortD, 3),
-             GPIO_PinOutGet(gpioPortB, 4));
+  GPIO_PinModeSet(PN_MOSFET_PORT, PN_MOSFET_PIN, gpioModePushPull, 0);
+  GPIO_PinOutSet(PN_MOSFET_PORT, PN_MOSFET_PIN);
+  //GPIO_PinOutClear(PN_MOSFET_PORT, PN_MOSFET_PIN);
+  printf("AppInt -> PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
+             GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
+             GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
+             GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
+             GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
 /*
   // Start timer used for periodic indications.
   sc = app_timer_start(&app_periodic_timer,
@@ -528,10 +535,9 @@ SL_WEAK void app_process_action(void)
       //IADC_reset(IADC0);
       my_IADC_disable(IADC0);
       is_capacitor_voltage_enough = false;
-
       em_mode_2 = false;
 
-      if(!GPIO_PinOutGet(gpioPortC, 3)){
+      if(!GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN)){
           presenceDetectorPowerON();
       }
       reInitialise_I2C();
@@ -544,77 +550,13 @@ SL_WEAK void app_process_action(void)
                                        advertising_set_handle_1,
                                        1);
       adv_presence = true;
-      printf("App_Periodic, Adv_presence : %d -> portC: %d, SDA: %d, SCL: %d, "
+      printf("App_Periodic, Adv_presence : %d -> PC3_Presence: %d, SDA: %d, SCL: %d, "
              "PB4_MOSFET: %d\r\n", adv_presence,
-                 GPIO_PinOutGet(gpioPortC, 3),
-                 GPIO_PinOutGet(gpioPortD, 2),
-                 GPIO_PinOutGet(gpioPortD, 3),
-                 GPIO_PinOutGet(gpioPortB, 4));
+                 GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
+                 GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
+                 GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
+                 GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
     }
-  }
-}
-
-/**************************************************************************//**
- * Bluetooth stack event handler.
- * This overrides the dummy weak implementation.
- *
- * @param[in] evt Event coming from the Bluetooth stack.
- *****************************************************************************/
-void sl_bt_on_event(sl_bt_msg_t *evt)
-{
-  //printf("sl_bt_on_event \r\n");
-
-  switch (SL_BT_MSG_ID(evt->header)) {
-    // -------------------------------
-    // This event indicates the device has started and the radio is ready.
-    // Do not call any stack command before receiving this boot event!
-    case sl_bt_evt_system_boot_id:
-
-      // Initialize iBeacon ADV data.
-      bcn_setup_adv_beaconing();
-      break;
-
-    case sl_bt_evt_system_soft_timer_id:
-      //printf("sl_bt_evt_system_soft_timer_id is expired \r\n");
-
-      if(adv_presence)
-      {
-        printf("lazy_1_Timer (adv_presence) -> portC: %d, SDA: %d, SCL: %d, "
-               "PB4_MOSFET: %d\r\n",
-                   GPIO_PinOutGet(gpioPortC, 3),
-                   GPIO_PinOutGet(gpioPortD, 2),
-                   GPIO_PinOutGet(gpioPortD, 3),
-                   GPIO_PinOutGet(gpioPortB, 4));
-        adv_presence_data();
-        adv_presence = false;
-      }
-      if(enter_EM3)
-      {
-        // The below line is not needed when advertising event is not continuously advertising
-        /* sl_status_t sc;
-        sc = sl_bt_advertiser_stop(advertising_set_handle);
-        app_assert_status(sc);*/
-
-        //BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM3 wakeup
-        clear_em2_mode();
-        enter_EM3 = false;
-        printf("lazy_2_Timer (enter_EM3) -> portC: %d, SDA: %d, SCL: %d, "
-               "PB4_MOSFET: %d\r\n\r\n",
-                   GPIO_PinOutGet(gpioPortC, 3),
-                   GPIO_PinOutGet(gpioPortD, 2),
-                   GPIO_PinOutGet(gpioPortD, 3),
-                   GPIO_PinOutGet(gpioPortB, 4));
-      }
-      break;
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Add additional event handlers here as your application requires!      //
-    ///////////////////////////////////////////////////////////////////////////
-
-    // -------------------------------
-    // Default event handler.
-    default:
-      break;
   }
 }
 
@@ -684,6 +626,70 @@ void adv_presence_data(void)
                                    0,
                                    advertising_set_handle,
                                    1);
+}
+
+/**************************************************************************//**
+ * Bluetooth stack event handler.
+ * This overrides the dummy weak implementation.
+ *
+ * @param[in] evt Event coming from the Bluetooth stack.
+ *****************************************************************************/
+void sl_bt_on_event(sl_bt_msg_t *evt)
+{
+  //printf("sl_bt_on_event \r\n");
+
+  switch (SL_BT_MSG_ID(evt->header)) {
+    // -------------------------------
+    // This event indicates the device has started and the radio is ready.
+    // Do not call any stack command before receiving this boot event!
+    case sl_bt_evt_system_boot_id:
+
+      // Initialize iBeacon ADV data.
+      bcn_setup_adv_beaconing();
+      break;
+
+    case sl_bt_evt_system_soft_timer_id:
+      //printf("sl_bt_evt_system_soft_timer_id is expired \r\n");
+
+      if(adv_presence)
+      {
+        printf("lazy_1_Timer (adv_presence) -> PC3_Presence: %d, SDA: %d, SCL: %d, "
+               "PB4_MOSFET: %d\r\n",
+                   GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
+                   GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
+                   GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
+                   GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
+        adv_presence_data();
+        adv_presence = false;
+      }
+      if(enter_EM3)
+      {
+        // The below line is not needed when advertising event is not continuously advertising
+        /* sl_status_t sc;
+        sc = sl_bt_advertiser_stop(advertising_set_handle);
+        app_assert_status(sc);*/
+
+        //BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM3 wakeup
+        clear_em2_mode();
+        enter_EM3 = false;
+        printf("lazy_2_Timer (enter_EM3) -> PC3_Presence: %d, SDA: %d, SCL: %d, "
+               "PB4_MOSFET: %d\r\n\r\n",
+                   GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
+                   GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
+                   GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
+                   GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
+      }
+      break;
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Add additional event handlers here as your application requires!      //
+    ///////////////////////////////////////////////////////////////////////////
+
+    // -------------------------------
+    // Default event handler.
+    default:
+      break;
+  }
 }
 
 static void bcn_setup_adv_beaconing(void)
