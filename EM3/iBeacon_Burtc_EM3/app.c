@@ -75,9 +75,17 @@
 /*******************************************************************************
  ***************************   GLOBAL VARIABLES   ******************************
  ******************************************************************************/
-// Stores latest ADC sample and converts to volts
-static volatile IADC_Result_t sample;
-static volatile double singleResult;
+// The voltage divider ratio, which is the ratio of the resistors in the voltage divider circuit
+// This ratio determines how the input voltage is divided before being measured by the ADC
+const double voltageDividerRatio = 1.31; // Set to 1.0 if no external voltage divider is used
+// A constant for the reference voltage in volts
+const double referenceVoltageV = 3.42;
+// A constant for the reference voltage in milli volts
+const double referenceVoltageMV = 3420;
+// A constant for the analog gain correction factor
+const double analogGainCorrectionFactor = 2.0;
+// A calibration factor to adjust the calculated voltage based on observed discrepancy
+const double calibrationFactor = 0.959;
 
 // The advertising set handle allocated from Bluetooth stack.
 static uint8_t advertising_set_handle = 0xff;
@@ -264,10 +272,9 @@ void initIADC(void)
   init.srcClkPrescale = IADC_calcSrcClkPrescale(IADC0, CLK_SRC_ADC_FREQ, 0);
 
   // Configuration 0 is used by both scan and single conversions by default
-  // Use internal bandgap (supply voltage in mV) as reference
   initAllConfigs.configs[0].reference = iadcCfgReferenceVddx;
-  initAllConfigs.configs[0].vRef = 1210;
-  initAllConfigs.configs[0].analogGain = iadcCfgAnalogGain1x;
+  initAllConfigs.configs[0].vRef = referenceVoltageMV; // Reference voltage in mV
+  initAllConfigs.configs[0].analogGain = iadcCfgAnalogGain0P5x; // Analog gain of 0.5x
 
   // Divides CLK_SRC_ADC to set the CLK_ADC frequency for desired sample rate
   initAllConfigs.configs[0].adcClkPrescale = IADC_calcAdcClkPrescale(IADC0,
@@ -320,14 +327,14 @@ void change_burtc_compare_value(uint32_t burtc_counter)
 /**************************************************************************//**
  * @brief  Function to check super capacitor voltage and take action
  *****************************************************************************/
-void handle_super_capacitor_voltage(double singleResult)
+void handle_super_capacitor_voltage(double superCapVoltage)
 {
   // Thresholds for the super capacitor voltage
-  const float Vmin = 4.42;
-  const float Vmax = 4.47;
+  const float Vmin = 4.30;
+  const float Vmax = 4.45;
 
   // Check if the voltage is below the minimum threshold
-  if (singleResult <= Vmin) {
+  if (superCapVoltage <= Vmin) {
       low_voltage = true;
 
       // Disable the IADC and clear EM2 mode
@@ -344,12 +351,11 @@ void handle_super_capacitor_voltage(double singleResult)
              GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
 
       change_burtc_compare_value(60000);
-
       return;
   }
 
   // Check if the voltage was previously low and now is within the valid range
-  if (low_voltage && singleResult >= Vmax) {
+  if (low_voltage && superCapVoltage >= Vmax) {
       is_capacitor_voltage_enough = true;
       low_voltage = false;
       printf("Super Capacitor voltage is now enough.\r\n");
@@ -369,7 +375,7 @@ void handle_super_capacitor_voltage(double singleResult)
 
       return;
   }
-  if(singleResult >= Vmax){
+  if(superCapVoltage >= Vmax){
       change_burtc_compare_value(BURTC_IRQ_PERIOD);
   }
   // If not low voltage, capacitor voltage is enough
@@ -381,26 +387,32 @@ void handle_super_capacitor_voltage(double singleResult)
  *****************************************************************************/
 void IADC_IRQHandler(void)
 {
+  // Stores latest ADC sample and converts to volts
+  IADC_Result_t sample;
+  sample.data = 0;
+
   // Read most recent single conversion result
   sample = IADC_readSingleResult(IADC0);
 
-  /* Calculate input voltage:
-     For single-ended the result range is 0 to +Vref, i.e.,
-     for Vref = VBGR = 1.21V, and with analog gain = 0.5,
-     12 bits represents 2.43V full scale IADC range.
+  /* 1. Calculate the measured input voltage based on the ADC sample data and
+        apply the calibration factor:
+     2. For single-ended the result range is 0 to +Vref, i.e.,
+        for Vref 1710V, and with analog gain = 0.5,
+        12 bits represents 3.42 (referenceVoltageV) full scale IADC range.
   */
+  // Calculate the intermediate voltage based on the ADC sample data
+  double intermediateVoltage = sample.data * referenceVoltageV / 0xFFF;
 
-  singleResult = sample.data * 3.42 / 0xFFF;
+  // Apply the analog gain correction factor and calibration factor
+  double measuredVoltage = (intermediateVoltage * analogGainCorrectionFactor) * calibrationFactor;
+  //printf("1.Measured Voltage = %.3lf\r\n", voltageDivider);
 
-  //printf("1.Voltage_Divider = %.3lf\r\n", singleResult);
-
-  singleResult = singleResult * 1.32; // To reflect the actual supercap voltage
-
-  //printf("2.Voltage_Divider = %.3lf\r\n", singleResult);
+  // To reflect the actual supercap voltage, multiple with voltageDividerRatio
+  double superCapVoltage = measuredVoltage * voltageDividerRatio;
+  //printf("2.SuperCap_Voltage = %.3lf\r\n", superCapVoltage);
 
   IADC_clearInt(IADC0, IADC_IF_SINGLEDONE);
-
-  float float_value = singleResult;
+  float float_value = superCapVoltage;
 
   // Extract the integer part
   int_part = (uint8_t)float_value;
@@ -408,12 +420,11 @@ void IADC_IRQHandler(void)
   // Extract the first digit of the fractional part
   decimal_part = (uint8_t)((float_value - int_part) * 100);
 
-  // Print the integer values
-  printf("Voltage_Divider = %.3lf, SuperCap Voltage = %d.%dV, "
-           "***singleResult[%.3lfV], sample.data[%ld]***\r\n", singleResult/1.32,
-           int_part, decimal_part, singleResult, sample.data);
+  printf("Sample.data[%ld], Voltage_Divider = %.3lfV, SuperCap_Voltage = %.3lfV,"
+         " BLE_adv_volt = %d.%dV\r\n",
+         sample.data, measuredVoltage, superCapVoltage, int_part, decimal_part);
 
-  handle_super_capacitor_voltage(singleResult);
+  handle_super_capacitor_voltage(superCapVoltage);
 }
 
 /**************************************************************************//**
