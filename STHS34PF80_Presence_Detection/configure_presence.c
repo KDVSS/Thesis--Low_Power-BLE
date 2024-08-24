@@ -1,5 +1,5 @@
-#include <stdio.h>
 #include <configure_presence.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "em_device.h"
@@ -203,14 +203,14 @@ void configure_sths34pf80(void)
   printf("%s", bandwidth_lpf);
   memset(bandwidth_lpf, '\0', sizeof(bandwidth_lpf)); */
 
-  printf("Bandwidth of lpf_m: %d, lpf_p: %d, lpf_p_m: %d, lpf_a_t: %d\r\n", lpf_m, lpf_p, lpf_p_m, lpf_a_t);
+  printf("Bandwidth of lpf_m: %d, lpf_p: %d, lpf_p_m: %d, lpf_a_t: %d: \r\n", lpf_m, lpf_p, lpf_p_m, lpf_a_t);
 
   uint8_t set_bdu = 1;
   sths34pf80_block_data_update_set(&dev_ctx, set_bdu);
 
-  sths34pf80_presence_threshold_set(&dev_ctx, 200);
+  sths34pf80_presence_threshold_set(&dev_ctx, 100);
   sths34pf80_presence_hysteresis_set(&dev_ctx, 20);
-  sths34pf80_motion_threshold_set(&dev_ctx, 300);
+  sths34pf80_motion_threshold_set(&dev_ctx, 150);
   sths34pf80_motion_hysteresis_set(&dev_ctx, 30);
 
   sths34pf80_algo_reset(&dev_ctx);
@@ -244,7 +244,7 @@ void reConfigure_sths34pf80(void)
   printf("%s", bandwidth_lpf);
   memset(bandwidth_lpf, '\0', sizeof(bandwidth_lpf)); */
 
-  printf("Bandwidth of lpf_m: %d, lpf_p: %d, lpf_p_m: %d, lpf_a_t: %d \r\n", lpf_m, lpf_p, lpf_p_m, lpf_a_t);
+  printf("Bandwidth of lpf_m: %d, lpf_p: %d, lpf_p_m: %d, lpf_a_t: %d: \r\n\r\n", lpf_m, lpf_p, lpf_p_m, lpf_a_t);
 
   uint8_t set_bdu = 1;
   sths34pf80_block_data_update_set(&dev_ctx, set_bdu);
@@ -263,7 +263,7 @@ void reConfigure_sths34pf80(void)
 
   /* Set ODR */
   sths34pf80_odr_set(&dev_ctx, STHS34PF80_ODR_AT_30Hz);
-  //printf("reConfigure_sths34pf80() EXIT \r\n");
+  printf("reConfigure_sths34pf80() EXIT \r\n");
 }
 
 void get_presence(int number_of_samples, int16_t *t_presence_raw)
