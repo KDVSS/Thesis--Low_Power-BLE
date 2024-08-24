@@ -73,18 +73,26 @@
 /*******************************************************************************
  ***************************   GLOBAL VARIABLES   ******************************
  ******************************************************************************/
+// The voltage divider ratio, which is the ratio of the resistors in the voltage divider circuit
+// This ratio determines how the input voltage is divided before being measured by the ADC
+const double voltageDividerRatio = 1.31; // Set to 1.0 if no external voltage divider is used
+// A constant for the reference voltage in volts
+const double referenceVoltageV = 3.42;
+// A constant for the reference voltage in milli volts
+const double referenceVoltageMV = 3420;
+// A constant for the analog gain correction factor
+const double analogGainCorrectionFactor = 2.0;
+// A calibration factor to adjust the calculated voltage based on observed discrepancy
+const double calibrationFactor = 0.970;
 
 // Number of 1 KHz ULFRCO clocks between BURTC interrupts
 static uint32_t burtc_irq_period = 5000;
-
-// Stores latest ADC sample and converts to volts
-static volatile IADC_Result_t sample;
-static volatile double singleResult;
 
 // The advertising set handle allocated from Bluetooth stack.
 static uint8_t advertising_set_handle = 0xff;
 static uint8_t int_part = 0;
 static uint8_t decimal_part = 0;
+
 static bool enter_EM4 = false;
 static bool adv_presence = false;
 static bool trigger_IADC_Conversions = false;
@@ -262,8 +270,8 @@ void initIADC(void)
   // Configuration 0 is used by both scan and single conversions by default
   // Use internal bandgap (supply voltage in mV) as reference
   initAllConfigs.configs[0].reference = iadcCfgReferenceVddx;
-  initAllConfigs.configs[0].vRef = 1210;
-  initAllConfigs.configs[0].analogGain = iadcCfgAnalogGain1x;
+  initAllConfigs.configs[0].vRef = referenceVoltageMV; // Reference voltage in mV
+  initAllConfigs.configs[0].analogGain = iadcCfgAnalogGain0P5x; // Analog gain of 0.5x
 
   // Divides CLK_SRC_ADC to set the CLK_ADC frequency for desired sample rate
   initAllConfigs.configs[0].adcClkPrescale = IADC_calcAdcClkPrescale(IADC0,
@@ -323,12 +331,13 @@ void handle_super_capacitor_voltage(double singleResult)
   //printf("handle_super_capacitor_voltage()\r\n");
 
   // Thresholds for the super capacitor voltage
-  const float Vmin = 4.25;
-  const float Vmax = 4.70;
+  const float Vmin = 3.000000;
+  const float Vmax = 4.450000;
 
   // Check if the voltage is below the minimum threshold
   if (singleResult <= Vmin) {
       low_voltage = true;
+      BURAM->RET[1].REG = low_voltage;
 
       // Disable the IADC and clear EM2 mode
       my_IADC_disable(IADC0);
@@ -349,11 +358,16 @@ void handle_super_capacitor_voltage(double singleResult)
       return;
   }
 
+  low_voltage = BURAM->RET[1].REG;
   // Check if the voltage was previously low and now is within the valid range
   if (low_voltage && singleResult >= Vmax) {
-      is_capacitor_voltage_enough = true;
-      low_voltage = false;
       printf("Super Capacitor voltage is now enough.\r\n");
+      low_voltage = false;
+      BURAM->RET[1].REG = low_voltage;
+      burtc_irq_period = 5000;
+      change_burtc_compare_value(burtc_irq_period);
+      is_capacitor_voltage_enough = true;
+      return;
   } else if (low_voltage) {
       // If still in low voltage state, keep disabling IADC and clearing EM2 mode
       my_IADC_disable(IADC0);
@@ -371,13 +385,8 @@ void handle_super_capacitor_voltage(double singleResult)
       resetBurtc_and_enterEM4(true);
       return;
   }
-  if(singleResult >= Vmax){
-      burtc_irq_period = 5000;
-      change_burtc_compare_value(burtc_irq_period);
-  }
-  // If not low voltage, capacitor voltage is enough
+  // Normal scenario when super capacitor has enough voltage.
   is_capacitor_voltage_enough = true;
-
 }
 
 /**************************************************************************//**
@@ -385,6 +394,10 @@ void handle_super_capacitor_voltage(double singleResult)
  *****************************************************************************/
 void IADC_IRQHandler(void)
 {
+  // Stores latest ADC sample and converts to volts
+  IADC_Result_t sample;
+  sample.data = 0;
+
   // Read most recent single conversion result
   sample = IADC_readSingleResult(IADC0);
 
@@ -394,17 +407,20 @@ void IADC_IRQHandler(void)
      12 bits represents 2.43V full scale IADC range.
   */
 
-  singleResult = sample.data * 3.42 / 0xFFF;
+  // Calculate the intermediate voltage based on the ADC sample data
+  double intermediateVoltage = sample.data * referenceVoltageV / 0xFFF;
 
-  //printf("1.Voltage_Divider = %.3lf\r\n", singleResult);
+  // Apply the analog gain correction factor and calibration factor
+  double measuredVoltage = (intermediateVoltage * analogGainCorrectionFactor) * calibrationFactor;
+  //printf("1.Measured Voltage = %.3lf\r\n", voltageDivider);
 
-  singleResult = singleResult * 1.32; // To reflect the actual supercap voltage
-
-  //printf("2.Voltage_Divider = %.3lf\r\n", singleResult);
+  // To reflect the actual supercap voltage, multiple with voltageDividerRatio
+  double superCapVoltage = measuredVoltage * voltageDividerRatio;
+  //printf("2.SuperCap_Voltage = %.3lf\r\n", superCapVoltage);
 
   IADC_clearInt(IADC0, IADC_IF_SINGLEDONE);
 
-  float float_value = singleResult;
+  float float_value = superCapVoltage;
 
   // Extract the integer part
   int_part = (uint8_t)float_value;
@@ -412,13 +428,11 @@ void IADC_IRQHandler(void)
   // Extract the first digit of the fractional part
   decimal_part = (uint8_t)((float_value - int_part) * 100);
 
-  // Print the integer values
-  printf("Voltage_Divider = %.3lf, SuperCap Voltage = %d.%dV, "
-           "***singleResult[%.3lfV], sample.data[%ld]***\r\n", singleResult/1.32,
-           int_part, decimal_part, singleResult, sample.data);
+  printf("Sample.data[%ld], Voltage_Divider = %.3lfV, SuperCap_Voltage = %.2lfV,"
+         " BLE_adv_volt = %d.%dV\r\n",
+         sample.data, measuredVoltage, superCapVoltage, int_part, decimal_part);
 
-  handle_super_capacitor_voltage(singleResult);
-
+  handle_super_capacitor_voltage(superCapVoltage);
 }
 
 /**************************************************************************//**
@@ -437,6 +451,14 @@ void initBURTC(void)
   BURTC_Init(&burtcInit);
 
   BURTC_CounterReset();
+  if(BURAM->RET[1].REG == 1)
+    {
+      burtc_irq_period = 60000;
+    }
+  else if(BURAM->RET[1].REG == 0)
+    {
+      burtc_irq_period = 5000;
+    }
   BURTC_CompareSet(0, burtc_irq_period);
 
   BURTC_IntEnable(BURTC_IEN_COMP);    // Enable the compare interrupt
@@ -462,23 +484,22 @@ void BURTC_IRQHandler(void)
 void checkResetCause (void)
 {
   uint32_t cause = RMU_ResetCauseGet();
-
   RMU_ResetCauseClear();
-
   // Print reset cause
   if (cause & EMU_RSTCAUSE_PIN)
   {
-    //printf("-- RSTCAUSE = PIN \n");
+    printf("-- RSTCAUSE = PIN \r\n");
     BURAM->RET[0].REG = 0; // reset EM4 wakeup counter
+    BURAM->RET[1].REG = 0; // reset low voltage flag
   }
   else if (cause & EMU_RSTCAUSE_EM4)
   {
-    //printf("-- RSTCAUSE = EM4 wakeup \n");
+    //printf("-- RSTCAUSE = EM4 wakeup \r\n");
     BURAM->RET[0].REG += 1; // increment EM4 wakeup counter
-
   }
-  // Print # of EM4 wakeups
-  printf("--Number of EM4 wakeups = %ld \n", BURAM->RET[0].REG);
+  // Print # of EM4 wakeups and low voltage flag status
+  printf ("Number of EM4 wakeups = %ld, Low Voltage flag = %ld\r\n",
+          BURAM->RET[0].REG, BURAM->RET[1].REG);
 }
 
 void resetBurtc_and_enterEM4(bool reset_burtc_counter)
@@ -512,16 +533,15 @@ void app_init(void)
   EMU_EM4Init_TypeDef em4Init = EMU_EM4INIT_DEFAULT;
   EMU_EM4Init(&em4Init);
 */
-  // Check RESETCAUSE, update and print EM4 wakeup count
-  //checkResetCause();
 
   //printf("\r\nIn EM0\r\n");
   initCMUClocks();
-
   initBURTC();
-
   // Initialize the IADC
   initIADC();
+
+  // Check RESETCAUSE, update and print EM4 wakeup count
+  checkResetCause();
 
   GPIO_PinModeSet(PN_MOSFET_PORT, PN_MOSFET_PIN, gpioModePushPull, 0);
   GPIO_PinOutSet(PN_MOSFET_PORT, PN_MOSFET_PIN);
@@ -716,6 +736,21 @@ static void bcn_setup_adv_beaconing(void)
   int16_t set_max;
   int16_t rf_path_gain;
   int16_t calculated_power;
+
+  bd_addr address;
+  uint8_t address_type;
+
+  // Retrieve the BT Address.
+  sc = sl_bt_system_get_identity_address(&address, &address_type);
+  app_assert_status(sc);
+
+  //app_log("BT Address: ");
+  for (int i=0; i<5; i++)
+    {
+      printf("%02X:", address.addr[5-i]);
+    }
+   printf("%02X (%s)\r\n", address.addr[0], address_type == 0 ? "Public device address": "Static random address");
+
 
   // Create an advertising set.
   sc = sl_bt_advertiser_create_set(&advertising_set_handle);
