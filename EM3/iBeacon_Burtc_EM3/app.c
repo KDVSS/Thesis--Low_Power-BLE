@@ -144,10 +144,8 @@ PACKSTRUCT(static struct {
     { UINT16_TO_BYTE1(0x0215), UINT16_TO_BYTE0(0x0215) },
 
     // 128 bit / 16 byte UUID
-    /*{ 0xE2, 0xC5, 0x6D, 0xB5, 0xDF, 0xFB, 0x48, 0xD2, \
-      0xB0, 0x60, 0xD0, 0xF5, 0xA7, 0x10, 0x96, 0xE0 },*/
-    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    { 0xE2, 0xC5, 0x6D, 0xB5, 0xDF, 0xFB, 0x48, 0xD2, \
+      0xB0, 0x60, 0xD0, 0xF5, 0xA7, 0x10, 0x96, 0xE0 },
 
     // Beacon major number.
     // Set to 34987 and converted to correct format.
@@ -609,17 +607,17 @@ void adv_presence_data(void)
     printf("T_presence_raw: 0x%x (hex) <-> %d (dec)\r\n", t_presence_raw, t_presence_raw);
     presence_measurement_val_to_buf(t_presence_raw, presence_value);
 
-    bcn_beacon_adv_data.uuid[4] = presence_value[0];
-    bcn_beacon_adv_data.uuid[5] = presence_value[1];
-    bcn_beacon_adv_data.uuid[6] = int_part;
-    bcn_beacon_adv_data.uuid[7] = decimal_part;
+    bcn_beacon_adv_data.min_num[0] = presence_value[0];
+    bcn_beacon_adv_data.min_num[1] = presence_value[1];
+    bcn_beacon_adv_data.maj_num[0] = int_part;
+    bcn_beacon_adv_data.maj_num[1] = decimal_part;
 
     /*
      * printf("UINT16_TO_BYTE1: 0x%x, UINT16_TO_BYTE0:  0x%x  ", UINT16_TO_BYTE1(t_presence_raw),
            UINT16_TO_BYTE0(t_presence_raw));
 
-    bcn_beacon_adv_data.uuid[0] = UINT16_TO_BYTE1(t_presence_raw);
-    bcn_beacon_adv_data.uuid[1] = UINT16_TO_BYTE0(t_presence_raw);
+    bcn_beacon_adv_data.min_num[0] = UINT16_TO_BYTE1(t_presence_raw);
+    bcn_beacon_adv_data.min_num[1] = UINT16_TO_BYTE0(t_presence_raw);
 
     */
 
@@ -677,7 +675,7 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
         adv_presence_data();
         adv_presence = false;
       }
-      if(enter_EM3)
+      else if(enter_EM3)
       {
         // The below line is not needed when advertising event is not continuously advertising
         /* sl_status_t sc;
