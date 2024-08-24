@@ -24,8 +24,6 @@
 // CLK_ADC; IADC_SCHEDx PRESCALE has 10 valid bits
 #define CLK_ADC_FREQ            10000000
 
-// Number of 1 KHz ULFRCO clocks between BURTC interrupts
-#define BURTC_IRQ_PERIOD  5000
 // Macros.
 #define UINT16_TO_BYTES(n)            ((uint8_t) (n)), ((uint8_t)((n) >> 8))
 #define UINT16_TO_BYTE0(n)            ((uint8_t) (n))
@@ -85,7 +83,10 @@ const double referenceVoltageMV = 3420;
 // A constant for the analog gain correction factor
 const double analogGainCorrectionFactor = 2.0;
 // A calibration factor to adjust the calculated voltage based on observed discrepancy
-const double calibrationFactor = 0.959;
+const double calibrationFactor = 0.970;
+
+// Number of 1 KHz ULFRCO clocks between BURTC interrupts
+static uint32_t burtc_irq_period = 5000;
 
 // The advertising set handle allocated from Bluetooth stack.
 static uint8_t advertising_set_handle = 0xff;
@@ -330,13 +331,12 @@ void change_burtc_compare_value(uint32_t burtc_counter)
 void handle_super_capacitor_voltage(double superCapVoltage)
 {
   // Thresholds for the super capacitor voltage
-  const float Vmin = 4.30;
+  const float Vmin = 3.00;
   const float Vmax = 4.45;
 
   // Check if the voltage is below the minimum threshold
   if (superCapVoltage <= Vmin) {
       low_voltage = true;
-
       // Disable the IADC and clear EM2 mode
       my_IADC_disable(IADC0);
       em_mode_2 = false;
@@ -350,15 +350,19 @@ void handle_super_capacitor_voltage(double superCapVoltage)
              GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
              GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
 
-      change_burtc_compare_value(60000);
+      burtc_irq_period = 60000;
+      change_burtc_compare_value(burtc_irq_period);
       return;
   }
 
   // Check if the voltage was previously low and now is within the valid range
   if (low_voltage && superCapVoltage >= Vmax) {
-      is_capacitor_voltage_enough = true;
-      low_voltage = false;
       printf("Super Capacitor voltage is now enough.\r\n");
+      low_voltage = false;
+      burtc_irq_period = 5000;
+      change_burtc_compare_value(burtc_irq_period);
+      is_capacitor_voltage_enough = true;
+      return;
   } else if (low_voltage) {
       // If still in low voltage state, keep disabling IADC and clearing EM2 mode
       my_IADC_disable(IADC0);
@@ -375,10 +379,7 @@ void handle_super_capacitor_voltage(double superCapVoltage)
 
       return;
   }
-  if(superCapVoltage >= Vmax){
-      change_burtc_compare_value(BURTC_IRQ_PERIOD);
-  }
-  // If not low voltage, capacitor voltage is enough
+  // Normal scenario when super capacitor has enough voltage.
   is_capacitor_voltage_enough = true;
 }
 
@@ -420,7 +421,7 @@ void IADC_IRQHandler(void)
   // Extract the first digit of the fractional part
   decimal_part = (uint8_t)((float_value - int_part) * 100);
 
-  printf("Sample.data[%ld], Voltage_Divider = %.3lfV, SuperCap_Voltage = %.3lfV,"
+  printf("Sample.data[%ld], Voltage_Divider = %.3lfV, SuperCap_Voltage = %.2lfV,"
          " BLE_adv_volt = %d.%dV\r\n",
          sample.data, measuredVoltage, superCapVoltage, int_part, decimal_part);
 
@@ -443,7 +444,8 @@ void initBURTC(void)
   BURTC_Init(&burtcInit);
 
   BURTC_CounterReset();
-  BURTC_CompareSet(0, BURTC_IRQ_PERIOD);
+  burtc_irq_period = 5000;
+  BURTC_CompareSet(0, burtc_irq_period);
 
   BURTC_IntEnable(BURTC_IEN_COMP);    // Enable the compare interrupt
   NVIC_EnableIRQ(BURTC_IRQn);
@@ -512,7 +514,7 @@ void app_init(void)
 /*
   // Start timer used for periodic indications.
   sc = app_timer_start(&app_periodic_timer,
-                       BURTC_IRQ_PERIOD,
+                       burtc_irq_period,
                        app_periodic_timer_cb,
                        NULL,
                        true);
