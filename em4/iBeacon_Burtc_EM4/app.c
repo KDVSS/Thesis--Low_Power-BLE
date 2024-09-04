@@ -64,11 +64,24 @@
 #define PN_MOSFET_PIN             4
 
 /*
- * This example enters EM2 in the main while() loop; Setting this #define to 1
- * enables debug connectivity in EM2, which increases current consumption by
- * about 0.5uA
+ * Below defines will help to control which PRINTF's to execute
+
+
  */
-#define EM2DEBUG                  1
+#define PRINT_MAX                  1
+#define PRINT_MIN                  0
+
+#if PRINT_MAX
+    #define DEBUG_PRINT_MAX(...) printf(__VA_ARGS__)
+#else
+    #define DEBUG_PRINT_MAX(...)
+#endif
+
+#if PRINT_MIN
+    #define DEBUG_PRINT_MIN(...) printf(__VA_ARGS__)
+#else
+    #define DEBUG_PRINT_MIN(...)
+#endif
 
 /*******************************************************************************
  ***************************   GLOBAL VARIABLES   ******************************
@@ -83,15 +96,19 @@ const double referenceVoltageMV = 3420;
 // A constant for the analog gain correction factor
 const double analogGainCorrectionFactor = 2.0;
 // A calibration factor to adjust the calculated voltage based on observed discrepancy
-const double calibrationFactor = 0.970;
+// previous factor -> 0.970 //new factor with usart -> 0.9812, //new without usart -> 0.9927, 0.9986
+// const double calibrationFactor = 0.969; // when you connect with USB
+const double calibrationFactor = 0.985;
 
-// Number of 1 KHz ULFRCO clocks between BURTC interrupts
-static uint32_t burtc_irq_period = 5000;
+
+static uint8_t integer_part = 0;
+static uint16_t scaled_fractional_part = 0;
 
 // The advertising set handle allocated from Bluetooth stack.
 static uint8_t advertising_set_handle = 0xff;
-static uint8_t int_part = 0;
-static uint8_t decimal_part = 0;
+// Number of 1 KHz ULFRCO clocks between BURTC interrupts
+static uint32_t burtc_irq_period = 5000;
+
 
 static bool enter_EM4 = false;
 static bool adv_presence = false;
@@ -178,7 +195,7 @@ static void set_em2_mode(void);
  ******************************************************************************/
 void initCMUClocks(void)
 {
-  //printf("initCMUClocks() \r\n");
+  //DEBUG_PRINT_MAX("initCMUClocks() \r\n");
   // Disable clocks to the GPIO
   CMU_ClockEnable(cmuClock_GPIO, true);
 }
@@ -188,7 +205,7 @@ void initCMUClocks(void)
  ******************************************************************************/
 void deInitCMUClocks(void)
 {
-  printf("deInitCMUClocks() \r\n");
+  DEBUG_PRINT_MAX("deInitCMUClocks() \r\n");
   // Disable clocks to the GPIO
   CMU_ClockEnable(cmuClock_GPIO, false);
 }
@@ -198,7 +215,7 @@ void deInitCMUClocks(void)
  *****************************************************************************/
 void presenceDetectorPowerON(void)
 {
-  //printf("presenceDetectorPowerON()\r\n");
+  //DEBUG_PRINT_MAX("presenceDetectorPowerON()\r\n");
   GPIO_PinModeSet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN, gpioModePushPull, 1);
 }
 
@@ -207,7 +224,7 @@ void presenceDetectorPowerON(void)
  *****************************************************************************/
 void presenceDetectorPowerOFF(void)
 {
-  //printf("presenceDetectorPowerOFF()\r\n");
+  //DEBUG_PRINT_MAX("presenceDetectorPowerOFF()\r\n");
   GPIO_PinModeSet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN, gpioModePushPull, 0);
 }
 
@@ -260,7 +277,7 @@ void initIADC(void)
   CMU_ClockSelectSet(cmuClock_IADCCLK, cmuSelect_FSRCO);
 
   // Modify init structs and initialize
-  init.warmup = iadcWarmupKeepWarm;
+  init.warmup = iadcWarmupNormal;
 
   // Set the HFSCLK prescale value here
   init.srcClkPrescale = IADC_calcSrcClkPrescale(IADC0, CLK_SRC_ADC_FREQ, 0);
@@ -312,7 +329,7 @@ void initIADC(void)
  *****************************************************************************/
 void change_burtc_compare_value(uint32_t burtc_counter)
 {
-  //printf("change_burtc_compare_value()\r\n");
+  //DEBUG_PRINT_MAX("change_burtc_compare_value()\r\n");
 
   BURTC_IntDisable(BURTC_IEN_COMP); // Disable the compare interrupt
   BURTC_IntClear(BURTC_IF_COMP);    // clear any pending interrupt flags
@@ -324,16 +341,16 @@ void change_burtc_compare_value(uint32_t burtc_counter)
 /**************************************************************************//**
  * @brief  Function to check super capacitor voltage and take action
  *****************************************************************************/
-void handle_super_capacitor_voltage(double singleResult)
+void handle_super_capacitor_voltage(double superCapVoltage)
 {
-  //printf("handle_super_capacitor_voltage()\r\n");
+  //DEBUG_PRINT_MAX("handle_super_capacitor_voltage()\r\n");
 
   // Thresholds for the super capacitor voltage
-  const float Vmin = 3.000000;
-  const float Vmax = 4.450000;
+  const float Vmin = 4.300000;
+  const float Vmax = 4.400000;
 
   // Check if the voltage is below the minimum threshold
-  if (singleResult <= Vmin) {
+  if (superCapVoltage <= Vmin) {
       low_voltage = true;
       BURAM->RET[1].REG = low_voltage;
 
@@ -342,7 +359,7 @@ void handle_super_capacitor_voltage(double singleResult)
       em_mode_2 = false;
       clear_em2_mode();
 
-      printf("Voltage is less than %.2fV, Enter_EM4 -> "
+      DEBUG_PRINT_MAX("Voltage is less than %.2fV, Enter_EM4 -> "
              "PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
              Vmin,
              GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
@@ -350,7 +367,7 @@ void handle_super_capacitor_voltage(double singleResult)
              GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
              GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
 
-      burtc_irq_period = 60000;
+      burtc_irq_period = 240000;
       change_burtc_compare_value(burtc_irq_period);
       resetBurtc_and_enterEM4(true);
       return;
@@ -358,11 +375,11 @@ void handle_super_capacitor_voltage(double singleResult)
 
   low_voltage = BURAM->RET[1].REG;
   // Check if the voltage was previously low and now is within the valid range
-  if (low_voltage && singleResult >= Vmax) {
-      printf("Super Capacitor voltage is now enough.\r\n");
+  if (low_voltage && superCapVoltage >= Vmax) {
+      DEBUG_PRINT_MAX("Super Capacitor voltage is now enough.\r\n");
       low_voltage = false;
       BURAM->RET[1].REG = low_voltage;
-      burtc_irq_period = 5000;
+      burtc_irq_period = 9000;
       change_burtc_compare_value(burtc_irq_period);
       is_capacitor_voltage_enough = true;
       return;
@@ -372,7 +389,7 @@ void handle_super_capacitor_voltage(double singleResult)
       em_mode_2 = false;
       clear_em2_mode();
 
-      printf("Super Capacitor is not fully charged(%0.2fV), Enter_EM4 -> "
+      DEBUG_PRINT_MAX("Super Capacitor is not fully charged(%0.2fV), Enter_EM4 -> "
              "PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
              Vmax,
              GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
@@ -410,25 +427,34 @@ void IADC_IRQHandler(void)
 
   // Apply the analog gain correction factor and calibration factor
   double measuredVoltage = (intermediateVoltage * analogGainCorrectionFactor) * calibrationFactor;
-  //printf("1.Measured Voltage = %.3lf\r\n", voltageDivider);
+  //DEBUG_PRINT_MAX("1.Measured Voltage = %.3lf\r\n", voltageDivider);
 
   // To reflect the actual supercap voltage, multiple with voltageDividerRatio
   double superCapVoltage = measuredVoltage * voltageDividerRatio;
-  //printf("2.SuperCap_Voltage = %.3lf\r\n", superCapVoltage);
+  //DEBUG_PRINT_MAX("2.SuperCap_Voltage = %.3lf\r\n", superCapVoltage);
 
   IADC_clearInt(IADC0, IADC_IF_SINGLEDONE);
 
-  float float_value = superCapVoltage;
-
   // Extract the integer part
-  int_part = (uint8_t)float_value;
+  integer_part = (uint8_t)superCapVoltage;  // Truncate the double to an 8-bit integer
 
-  // Extract the first digit of the fractional part
-  decimal_part = (uint8_t)((float_value - int_part) * 100);
+  // Extract the fractional part and scale it
+  double fractional_part = superCapVoltage - (double)integer_part;
+  scaled_fractional_part = (uint16_t)(fractional_part * 1000);
 
-  printf("Sample.data[%ld], Voltage_Divider = %.3lfV, SuperCap_Voltage = %.2lfV,"
-         " BLE_adv_volt = %d.%dV\r\n",
-         sample.data, measuredVoltage, superCapVoltage, int_part, decimal_part);
+/*
+  // Combine the two parts into a 32-bit unsigned integer (since 16-bit isn't enough)
+  uint32_t combined_value = (scaled_fractional_part << 8) | integer_part;
+
+  // To print 4.345 from combined_value:
+  integer_part = combined_value & 0xFF;  // Extract integer part (lower 8 bits)
+  scaled_fractional_part = (combined_value >> 8) & 0xFFFF;  // Extract fractional part (upper 16 bits)
+*/
+
+  DEBUG_PRINT_MAX("Sample.data[%ld], Voltage_Divider = %.3lfV, "
+      "SuperCap_voltage = %.3lfV, "
+      "BLE_adv_frac_volt = %d.%03dV \r\n",
+      sample.data, measuredVoltage, superCapVoltage, integer_part, scaled_fractional_part);
 
   handle_super_capacitor_voltage(superCapVoltage);
 }
@@ -451,11 +477,11 @@ void initBURTC(void)
   BURTC_CounterReset();
   if(BURAM->RET[1].REG == 1)
     {
-      burtc_irq_period = 60000;
+      burtc_irq_period = 20000;
     }
   else if(BURAM->RET[1].REG == 0)
     {
-      burtc_irq_period = 5000;
+      burtc_irq_period = 9000;
     }
   BURTC_CompareSet(0, burtc_irq_period);
 
@@ -469,10 +495,10 @@ void initBURTC(void)
  *****************************************************************************/
 void BURTC_IRQHandler(void)
 {
-  //printf("\r\nBURTC_IRQHandler()\n");
+  //DEBUG_PRINT_MAX("\r\nBURTC_IRQHandler()\n");
   BURTC_IntClear(BURTC_IF_COMP); // clear any pending interrupt flags
   BURTC_CounterReset(); // reset BURTC counter to wait burtc_irq_period sec before EM4 wakeup
-  //printf("-- BURTC counter reset \r\n");
+  //DEBUG_PRINT_MAX("-- BURTC counter reset \r\n");
 }
 
 /**************************************************************************//**
@@ -486,17 +512,17 @@ void checkResetCause (void)
   // Print reset cause
   if (cause & EMU_RSTCAUSE_PIN)
   {
-    printf("-- RSTCAUSE = PIN \r\n");
+    DEBUG_PRINT_MAX("-- RSTCAUSE = PIN \r\n");
     BURAM->RET[0].REG = 0; // reset EM4 wakeup counter
     BURAM->RET[1].REG = 0; // reset low voltage flag
   }
   else if (cause & EMU_RSTCAUSE_EM4)
   {
-    //printf("-- RSTCAUSE = EM4 wakeup \r\n");
+    //DEBUG_PRINT_MAX("-- RSTCAUSE = EM4 wakeup \r\n");
     BURAM->RET[0].REG += 1; // increment EM4 wakeup counter
   }
   // Print # of EM4 wakeups and low voltage flag status
-  printf ("Number of EM4 wakeups = %ld, Low Voltage flag = %ld\r\n",
+  DEBUG_PRINT_MAX ("Number of EM4 wakeups = %ld, Low Voltage flag = %ld\r\n",
           BURAM->RET[0].REG, BURAM->RET[1].REG);
 }
 
@@ -505,11 +531,11 @@ void resetBurtc_and_enterEM4(bool reset_burtc_counter)
   if(reset_burtc_counter)
    {
       BURTC_CounterReset();
-      //printf("Reset BURTC counter to wait full %ld sec before EM4 wakeup \n", burtc_irq_period/1000);
+      //DEBUG_PRINT_MAX("Reset BURTC counter to wait full %ld sec before EM4 wakeup \n", burtc_irq_period/1000);
    }
   // Enter EM4
-  printf("Entering EM4 and wake on BURTC compare in %ld seconds \r\n\r\n", burtc_irq_period/1000);
-  //RETARGET_SerialFlush(); // delay for printf to finish
+  DEBUG_PRINT_MAX("Entering EM4 and wake on BURTC compare in %ld seconds \r\n\r\n", burtc_irq_period/1000);
+  //RETARGET_SerialFlush(); // delay for DEBUG_PRINT_MAX to finish
   EMU_EnterEM4();
 }
 
@@ -518,7 +544,7 @@ void resetBurtc_and_enterEM4(bool reset_burtc_counter)
  ******************************************************************************/
 void app_init(void)
 {
-  //printf("app init()\r\n");
+  //DEBUG_PRINT_MAX("app init()\r\n");
   EMU_UnlatchPinRetention();
 
   set_em2_mode();
@@ -532,7 +558,7 @@ void app_init(void)
   EMU_EM4Init(&em4Init);
 */
 
-  //printf("\r\nIn EM0\r\n");
+  //DEBUG_PRINT_MAX("\r\nIn EM0\r\n");
   initCMUClocks();
   initBURTC();
   // Initialize the IADC
@@ -544,7 +570,7 @@ void app_init(void)
   GPIO_PinModeSet(PN_MOSFET_PORT, PN_MOSFET_PIN, gpioModePushPull, 0);
   GPIO_PinOutSet(PN_MOSFET_PORT, PN_MOSFET_PIN);
   //GPIO_PinOutClear(PN_MOSFET_PORT, PN_MOSFET_PIN);
-  printf("AppInt -> PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
+  DEBUG_PRINT_MAX("AppInt -> PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
              GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
              GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
              GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
@@ -586,7 +612,7 @@ SL_WEAK void app_process_action(void)
                                          advertising_set_handle,
                                          1);
         adv_presence = true;
-        printf("App_Periodic, Adv_presence : %d -> "
+        DEBUG_PRINT_MAX("App_Periodic, Adv_presence : %d -> "
                "PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
                adv_presence,
                GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
@@ -620,41 +646,43 @@ void adv_presence_data(void)
   uint8_t presence_value[2];
   sl_status_t sc;
 
+  bcn_beacon_adv_data.min_num[0] = 0;
+  bcn_beacon_adv_data.min_num[1] = integer_part;
+  bcn_beacon_adv_data.maj_num[0] = UINT16_TO_BYTE1(scaled_fractional_part);
+  bcn_beacon_adv_data.maj_num[1] = UINT16_TO_BYTE0(scaled_fractional_part);
+
   get_presence(1, &t_presence_raw);
   presenceDetectorPowerOFF();
   disable_I2C();
 
   if(t_presence_raw != 0)
   {
-    printf("T_presence_raw: 0x%x (hex) <-> %d (dec)\r\n", t_presence_raw, t_presence_raw);
+    DEBUG_PRINT_MAX("T_presence_raw: 0x%x (hex) <-> %d (dec)\r\n", t_presence_raw, t_presence_raw);
     presence_measurement_val_to_buf(t_presence_raw, presence_value);
 
-    bcn_beacon_adv_data.min_num[0] = presence_value[0];
-    bcn_beacon_adv_data.min_num[1] = presence_value[1];
-    bcn_beacon_adv_data.maj_num[0] = int_part;
-    bcn_beacon_adv_data.maj_num[1] = decimal_part;
+    // bcn_beacon_adv_data.min_num[0] = presence_value[0];
+    // bcn_beacon_adv_data.min_num[1] = presence_value[1];
 
-    /*
-     * printf("UINT16_TO_BYTE1: 0x%x, UINT16_TO_BYTE0:  0x%x  ", UINT16_TO_BYTE1(t_presence_raw),
-           UINT16_TO_BYTE0(t_presence_raw));
 
-    bcn_beacon_adv_data.min_num[0] = UINT16_TO_BYTE1(t_presence_raw);
-    bcn_beacon_adv_data.min_num[1] = UINT16_TO_BYTE0(t_presence_raw);
+    /*printf("UINT16_TO_BYTE1: 0x%x, UINT16_TO_BYTE0:  0x%x  ",
+           UINT16_TO_BYTE1(t_presence_raw), UINT16_TO_BYTE0(t_presence_raw));*/
 
-    */
-
-    //Set Advertising data
-    sc = sl_bt_legacy_advertiser_set_data(advertising_set_handle,
-                                         sl_bt_advertiser_advertising_data_packet,
-                                         sizeof(bcn_beacon_adv_data),
-                                         (const uint8_t *)&bcn_beacon_adv_data);
-    app_assert_status(sc);
-
-    // Start advertising and enable connections.
-    sc = sl_bt_legacy_advertiser_start(advertising_set_handle,
-                                      sl_bt_advertiser_non_connectable);
-    app_assert_status(sc);
+    //bcn_beacon_adv_data.min_num[0] = UINT16_TO_BYTE1(t_presence_raw);
+    //bcn_beacon_adv_data.min_num[1] = UINT16_TO_BYTE0(t_presence_raw);
   }
+
+  //Set Advertising data
+  sc = sl_bt_legacy_advertiser_set_data(advertising_set_handle,
+                                       sl_bt_advertiser_advertising_data_packet,
+                                       sizeof(bcn_beacon_adv_data),
+                                       (const uint8_t *)&bcn_beacon_adv_data);
+  app_assert_status(sc);
+
+  // Start advertising and enable connections.
+  sc = sl_bt_legacy_advertiser_start(advertising_set_handle,
+                                    sl_bt_advertiser_non_connectable);
+  app_assert_status(sc);
+
   enter_EM4 = true;
   sl_bt_system_set_lazy_soft_timer(16384,
                                    0,
@@ -689,11 +717,11 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       break;
 
     case sl_bt_evt_system_soft_timer_id:
-      //printf("sl_bt_evt_system_soft_timer_id is expired \r\n");
+      //DEBUG_PRINT_MAX("sl_bt_evt_system_soft_timer_id is expired \r\n");
 
       if(adv_presence)
       {
-        printf("lazy_1_Timer (adv_presence) -> portC: %d, SDA: %d, SCL: %d\r\n",
+        DEBUG_PRINT_MAX("lazy_1_Timer (adv_presence) -> portC: %d, SDA: %d, SCL: %d\r\n",
                    GPIO_PinOutGet(gpioPortC, 3),
                    GPIO_PinOutGet(gpioPortD, 2),
                    GPIO_PinOutGet(gpioPortD, 3));
@@ -704,7 +732,7 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       {
         /*sc = sl_bt_advertiser_stop(advertising_set_handle);
         app_assert_status(sc); */
-        printf("lazy_2_Timer (enter_EM4) -> portC: %d, SDA: %d, SCL: %d\r\n",
+        DEBUG_PRINT_MAX("lazy_2_Timer (enter_EM4) -> portC: %d, SDA: %d, SCL: %d\r\n",
                    GPIO_PinOutGet(gpioPortC, 3),
                    GPIO_PinOutGet(gpioPortD, 2),
                    GPIO_PinOutGet(gpioPortD, 3));
@@ -745,9 +773,9 @@ static void bcn_setup_adv_beaconing(void)
   //app_log("BT Address: ");
   for (int i=0; i<5; i++)
     {
-      printf("%02X:", address.addr[5-i]);
+      DEBUG_PRINT_MAX("%02X:", address.addr[5-i]);
     }
-   printf("%02X (%s)\r\n", address.addr[0], address_type == 0 ? "Public device address": "Static random address");
+   DEBUG_PRINT_MAX("%02X (%s)\r\n", address.addr[0], address_type == 0 ? "Public device address": "Static random address");
 
 
   // Create an advertising set.
@@ -798,7 +826,7 @@ static void set_em2_mode(void)
   if (!em2_is_enabled) {
     em2_is_enabled = true;
     sl_power_manager_add_em_requirement(SL_POWER_MANAGER_EM2);
-    //printf("SL_POWER_MANAGER_EM2 requirement added \r\n");
+    //DEBUG_PRINT_MAX("SL_POWER_MANAGER_EM2 requirement added \r\n");
   }
 }
 
@@ -810,6 +838,6 @@ static void clear_em2_mode(void)
   if (em2_is_enabled) {
     em2_is_enabled = false;
     sl_power_manager_remove_em_requirement(SL_POWER_MANAGER_EM2);
-    //printf("SL_POWER_MANAGER_EM2 requirement removed \r\n");
+    //DEBUG_PRINT_MAX("SL_POWER_MANAGER_EM2 requirement removed \r\n");
   }
 }

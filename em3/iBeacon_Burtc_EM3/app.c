@@ -83,7 +83,9 @@ const double referenceVoltageMV = 3420;
 // A constant for the analog gain correction factor
 const double analogGainCorrectionFactor = 2.0;
 // A calibration factor to adjust the calculated voltage based on observed discrepancy
-const double calibrationFactor = 0.970;
+// const double calibrationFactor = 0.970; // When USB is connected
+const double calibrationFactor = 0.984; // When PV cell is connected
+
 
 // Number of 1 KHz ULFRCO clocks between BURTC interrupts
 static uint32_t burtc_irq_period = 5000;
@@ -91,8 +93,8 @@ static uint32_t burtc_irq_period = 5000;
 // The advertising set handle allocated from Bluetooth stack.
 static uint8_t advertising_set_handle = 0xff;
 static uint8_t advertising_set_handle_1 = 0xff;
-static uint8_t int_part = 0;
-static uint8_t decimal_part = 0;
+static uint8_t integer_part = 0;
+static uint16_t scaled_fractional_part = 0;
 
 static bool enter_EM3 = false;
 static bool adv_presence = false;
@@ -329,8 +331,8 @@ void change_burtc_compare_value(uint32_t burtc_counter)
 void handle_super_capacitor_voltage(double superCapVoltage)
 {
   // Thresholds for the super capacitor voltage
-  const float Vmin = 3.00;
-  const float Vmax = 4.45;
+  const float Vmin = 4.000;
+  const float Vmax = 4.050;
 
   // Check if the voltage is below the minimum threshold
   if (superCapVoltage <= Vmin) {
@@ -348,7 +350,7 @@ void handle_super_capacitor_voltage(double superCapVoltage)
              GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
              GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
 
-      burtc_irq_period = 60000;
+      burtc_irq_period = 360000;
       change_burtc_compare_value(burtc_irq_period);
       return;
   }
@@ -357,7 +359,7 @@ void handle_super_capacitor_voltage(double superCapVoltage)
   if (low_voltage && superCapVoltage >= Vmax) {
       printf("Super Capacitor voltage is now enough.\r\n");
       low_voltage = false;
-      burtc_irq_period = 5000;
+      burtc_irq_period = 9000;
       change_burtc_compare_value(burtc_irq_period);
       is_capacitor_voltage_enough = true;
       return;
@@ -414,14 +416,15 @@ void IADC_IRQHandler(void)
   float float_value = superCapVoltage;
 
   // Extract the integer part
-  int_part = (uint8_t)float_value;
+  integer_part = (uint8_t)float_value;
 
-  // Extract the first digit of the fractional part
-  decimal_part = (uint8_t)((float_value - int_part) * 100);
+  // Extract the fractional part and scale it
+  double fractional_part = float_value - (double)integer_part;
+  scaled_fractional_part = (uint16_t)(fractional_part * 1000);
 
-  printf("Sample.data[%ld], Voltage_Divider = %.3lfV, SuperCap_Voltage = %.2lfV,"
-         " BLE_adv_volt = %d.%dV\r\n",
-         sample.data, measuredVoltage, superCapVoltage, int_part, decimal_part);
+  printf("Sample.data[%ld], Voltage_Divider = %.3lfV, SuperCap_Voltage = %.3lfV,"
+         " BLE_adv_frac_volt = %d.%03dV\r\n",
+         sample.data, measuredVoltage, superCapVoltage, integer_part, scaled_fractional_part);
 
   handle_super_capacitor_voltage(superCapVoltage);
 }
@@ -442,7 +445,6 @@ void initBURTC(void)
   BURTC_Init(&burtcInit);
 
   BURTC_CounterReset();
-  burtc_irq_period = 5000;
   BURTC_CompareSet(0, burtc_irq_period);
 
   BURTC_IntEnable(BURTC_IEN_COMP);    // Enable the compare interrupt
@@ -596,44 +598,44 @@ void adv_presence_data(void)
   uint8_t presence_value[2];
   sl_status_t sc;
 
+  //Populate advertising data with super capacitor voltage
+  bcn_beacon_adv_data.min_num[0] = 0;
+  bcn_beacon_adv_data.min_num[1] = integer_part;
+  bcn_beacon_adv_data.maj_num[0] = UINT16_TO_BYTE1(scaled_fractional_part);
+  bcn_beacon_adv_data.maj_num[1] = UINT16_TO_BYTE0(scaled_fractional_part);
+
   get_presence(1, &t_presence_raw);
   presenceDetectorPowerOFF();
   disable_I2C();
-  //GPIO_PinModeSet(gpioPortB, 0, gpioModePushPull, 0);
-
 
   if(t_presence_raw != 0)
   {
     printf("T_presence_raw: 0x%x (hex) <-> %d (dec)\r\n", t_presence_raw, t_presence_raw);
     presence_measurement_val_to_buf(t_presence_raw, presence_value);
 
-    bcn_beacon_adv_data.min_num[0] = presence_value[0];
-    bcn_beacon_adv_data.min_num[1] = presence_value[1];
-    bcn_beacon_adv_data.maj_num[0] = int_part;
-    bcn_beacon_adv_data.maj_num[1] = decimal_part;
+    // bcn_beacon_adv_data.min_num[0] = presence_value[0];
+    // bcn_beacon_adv_data.min_num[1] = presence_value[1];
 
-    /*
-     * printf("UINT16_TO_BYTE1: 0x%x, UINT16_TO_BYTE0:  0x%x  ", UINT16_TO_BYTE1(t_presence_raw),
-           UINT16_TO_BYTE0(t_presence_raw));
 
-    bcn_beacon_adv_data.min_num[0] = UINT16_TO_BYTE1(t_presence_raw);
-    bcn_beacon_adv_data.min_num[1] = UINT16_TO_BYTE0(t_presence_raw);
+    /*printf("UINT16_TO_BYTE1: 0x%x, UINT16_TO_BYTE0:  0x%x  ",
+           UINT16_TO_BYTE1(t_presence_raw), UINT16_TO_BYTE0(t_presence_raw));*/
 
-    */
-
-    //Set Advertising data
-    sc = sl_bt_legacy_advertiser_set_data(advertising_set_handle,
-                                         sl_bt_advertiser_advertising_data_packet,
-                                         sizeof(bcn_beacon_adv_data),
-                                         (const uint8_t *)&bcn_beacon_adv_data);
-    app_assert_status(sc);
-
-    // Start advertising and enable connections.
-    sc = sl_bt_legacy_advertiser_start(advertising_set_handle,
-                                      sl_bt_advertiser_non_connectable);
-    app_assert_status(sc);
-
+    //bcn_beacon_adv_data.min_num[0] = UINT16_TO_BYTE1(t_presence_raw);
+    //bcn_beacon_adv_data.min_num[1] = UINT16_TO_BYTE0(t_presence_raw);
   }
+
+  //Set Advertising data
+  sc = sl_bt_legacy_advertiser_set_data(advertising_set_handle,
+                                       sl_bt_advertiser_advertising_data_packet,
+                                       sizeof(bcn_beacon_adv_data),
+                                       (const uint8_t *)&bcn_beacon_adv_data);
+  app_assert_status(sc);
+
+  // Start advertising and enable connections.
+  sc = sl_bt_legacy_advertiser_start(advertising_set_handle,
+                                    sl_bt_advertiser_non_connectable);
+  app_assert_status(sc);
+
   enter_EM3 = true;
   sl_bt_system_set_lazy_soft_timer(16384,
                                    0,
