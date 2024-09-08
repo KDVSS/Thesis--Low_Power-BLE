@@ -95,12 +95,13 @@ static uint8_t advertising_set_handle = 0xff;
 static uint8_t advertising_set_handle_1 = 0xff;
 static uint8_t integer_part = 0;
 static uint16_t scaled_fractional_part = 0;
+static uint8_t em3_wakeup_counter = 0;
 
+static bool sleep_in_EM3 = false;
 static bool enter_EM3 = false;
 static bool adv_presence = false;
 static bool trigger_IADC_Conversions = false;
 static bool is_capacitor_voltage_enough = false;
-static bool low_voltage = false;
 static bool em2_is_enabled = true;
 static bool em_mode_2 = false;
 
@@ -331,12 +332,12 @@ void change_burtc_compare_value(uint32_t burtc_counter)
 void handle_super_capacitor_voltage(double superCapVoltage)
 {
   // Thresholds for the super capacitor voltage
-  const float Vmin = 4.000;
-  const float Vmax = 4.050;
+  const float Vmin = 4.000; //Not using
+  const float Vmax = 3.820;
 
   // Check if the voltage is below the minimum threshold
-  if (superCapVoltage <= Vmin) {
-      low_voltage = true;
+  if ((em3_wakeup_counter > 14) && (sleep_in_EM3 == false)) {
+      sleep_in_EM3 = true;
       // Disable the IADC and clear EM2 mode
       my_IADC_disable(IADC0);
       em_mode_2 = false;
@@ -350,20 +351,21 @@ void handle_super_capacitor_voltage(double superCapVoltage)
              GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
              GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
 
-      burtc_irq_period = 360000;
+      burtc_irq_period = 130000;
       change_burtc_compare_value(burtc_irq_period);
       return;
   }
 
   // Check if the voltage was previously low and now is within the valid range
-  if (low_voltage && superCapVoltage >= Vmax) {
+  if (sleep_in_EM3 && superCapVoltage >= Vmax) {
       printf("Super Capacitor voltage is now enough.\r\n");
-      low_voltage = false;
-      burtc_irq_period = 9000;
+      sleep_in_EM3 = false;
+      em3_wakeup_counter = 0;
+      burtc_irq_period = 5000;
       change_burtc_compare_value(burtc_irq_period);
       is_capacitor_voltage_enough = true;
       return;
-  } else if (low_voltage) {
+  } else if (sleep_in_EM3) {
       // If still in low voltage state, keep disabling IADC and clearing EM2 mode
       my_IADC_disable(IADC0);
       em_mode_2 = false;
@@ -380,7 +382,10 @@ void handle_super_capacitor_voltage(double superCapVoltage)
       return;
   }
   // Normal scenario when super capacitor has enough voltage.
-  is_capacitor_voltage_enough = true;
+  if (!sleep_in_EM3)
+  {
+    is_capacitor_voltage_enough = true;
+  }
 }
 
 /**************************************************************************//**
@@ -460,7 +465,7 @@ void BURTC_IRQHandler(void)
   //printf("BURTC_IRQHandler() \r\n");
   //sl_udelay_wait(100000);
   //initGPIO();
-
+  em3_wakeup_counter++;
   BURTC_IntClear(BURTC_IF_COMP); // clear any pending interrupt flags
   BURTC_CounterReset(); // reset BURTC counter to wait full ~5 sec before EM3 wakeup
   //printf("-- BURTC counter reset \r\n");
