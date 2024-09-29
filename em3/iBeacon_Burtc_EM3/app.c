@@ -84,7 +84,9 @@ const double referenceVoltageMV = 3420;
 const double analogGainCorrectionFactor = 2.0;
 // A calibration factor to adjust the calculated voltage based on observed discrepancy
 // const double calibrationFactor = 0.970; // When USB is connected
-const double calibrationFactor = 0.984; // When PV cell is connected
+//const double calibrationFactor = 0.984; // When PV cell is connected with higher voltages above 4.0V
+const double calibrationFactor = 0.981; // When PV cell is connected with lower voltages below 3.99V
+
 
 
 // Number of 1 KHz ULFRCO clocks between BURTC interrupts
@@ -333,7 +335,7 @@ void handle_super_capacitor_voltage(double superCapVoltage)
 {
   // Thresholds for the super capacitor voltage
   const float Vmin = 4.000; //Not using
-  const float Vmax = 3.820;
+  const float Vmax = 3.800;
 
   // Check if the voltage is below the minimum threshold
   if ((em3_wakeup_counter > 14) && (sleep_in_EM3 == false)) {
@@ -351,7 +353,7 @@ void handle_super_capacitor_voltage(double superCapVoltage)
              GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
              GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
 
-      burtc_irq_period = 130000;
+      burtc_irq_period = 150000;
       change_burtc_compare_value(burtc_irq_period);
       return;
   }

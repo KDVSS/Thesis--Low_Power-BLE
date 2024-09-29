@@ -98,23 +98,22 @@ const double analogGainCorrectionFactor = 2.0;
 // A calibration factor to adjust the calculated voltage based on observed discrepancy
 // previous factor -> 0.970 //new factor with usart -> 0.9812, //new without usart -> 0.9927, 0.9986
 // const double calibrationFactor = 0.969; // when you connect with USB
-const double calibrationFactor = 0.985;
+const double calibrationFactor = 0.983;
 
-
-static uint8_t integer_part = 0;
-static uint16_t scaled_fractional_part = 0;
-
-// The advertising set handle allocated from Bluetooth stack.
-static uint8_t advertising_set_handle = 0xff;
 // Number of 1 KHz ULFRCO clocks between BURTC interrupts
 static uint32_t burtc_irq_period = 5000;
 
+// The advertising set handle allocated from Bluetooth stack.
+static uint8_t advertising_set_handle = 0xff;
+static uint8_t integer_part = 0;
+static uint16_t scaled_fractional_part = 0;
+static uint8_t em4_wakeup_counter = 0;
 
+static bool sleep_in_EM4 = false;
 static bool enter_EM4 = false;
 static bool adv_presence = false;
 static bool trigger_IADC_Conversions = false;
 static bool is_capacitor_voltage_enough = false;
-static bool low_voltage = false;
 static bool em2_is_enabled = true;
 static bool em_mode_2 = false;
 
@@ -346,44 +345,22 @@ void handle_super_capacitor_voltage(double superCapVoltage)
   //DEBUG_PRINT_MAX("handle_super_capacitor_voltage()\r\n");
 
   // Thresholds for the super capacitor voltage
-  const float Vmin = 4.300000;
-  const float Vmax = 4.400000;
+  const float Vmax = 4.12000;
+  sleep_in_EM4 = BURAM->RET[1].REG;
+  em4_wakeup_counter = BURAM->RET[0].REG;
 
-  // Check if the voltage is below the minimum threshold
-  if (superCapVoltage <= Vmin) {
-      low_voltage = true;
-      BURAM->RET[1].REG = low_voltage;
-
-      // Disable the IADC and clear EM2 mode
-      my_IADC_disable(IADC0);
-      em_mode_2 = false;
-      clear_em2_mode();
-
-      DEBUG_PRINT_MAX("Voltage is less than %.2fV, Enter_EM4 -> "
-             "PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
-             Vmin,
-             GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
-             GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
-             GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
-             GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
-
-      burtc_irq_period = 240000;
-      change_burtc_compare_value(burtc_irq_period);
-      resetBurtc_and_enterEM4(true);
-      return;
-  }
-
-  low_voltage = BURAM->RET[1].REG;
   // Check if the voltage was previously low and now is within the valid range
-  if (low_voltage && superCapVoltage >= Vmax) {
+  if (sleep_in_EM4 && superCapVoltage >= Vmax) {
       DEBUG_PRINT_MAX("Super Capacitor voltage is now enough.\r\n");
-      low_voltage = false;
-      BURAM->RET[1].REG = low_voltage;
-      burtc_irq_period = 9000;
+      sleep_in_EM4 = false;
+      em4_wakeup_counter = 0;
+      BURAM->RET[1].REG = sleep_in_EM4;
+      BURAM->RET[0].REG = em4_wakeup_counter;
+      burtc_irq_period = 5000;
       change_burtc_compare_value(burtc_irq_period);
       is_capacitor_voltage_enough = true;
       return;
-  } else if (low_voltage) {
+  } else if (sleep_in_EM4) {
       // If still in low voltage state, keep disabling IADC and clearing EM2 mode
       my_IADC_disable(IADC0);
       em_mode_2 = false;
@@ -400,8 +377,25 @@ void handle_super_capacitor_voltage(double superCapVoltage)
       resetBurtc_and_enterEM4(true);
       return;
   }
+
   // Normal scenario when super capacitor has enough voltage.
-  is_capacitor_voltage_enough = true;
+  if (!sleep_in_EM4)
+  {
+    is_capacitor_voltage_enough = true;
+    if(em4_wakeup_counter == 14){
+        sleep_in_EM4 = true;
+        BURAM->RET[1].REG = sleep_in_EM4;
+        burtc_irq_period = 70000;
+        change_burtc_compare_value(burtc_irq_period);
+        DEBUG_PRINT_MAX("Reached max allowed [%d] presence detections, Enter_EM4-> "
+               "PC3_Presence: %d, SDA: %d, SCL: %d, PB4_MOSFET: %d\r\n",
+               em4_wakeup_counter,
+               GPIO_PinOutGet(PRESENCE_DETECTOR_PORT, PRESENCE_DETECTOR_PIN),
+               GPIO_PinOutGet(I2C_SCL_PORT, I2C_SCL_PIN),
+               GPIO_PinOutGet(I2C_SDA_PORT, I2C_SDA_PIN),
+               GPIO_PinOutGet(PN_MOSFET_PORT, PN_MOSFET_PIN));
+    }
+  }
 }
 
 /**************************************************************************//**
@@ -477,11 +471,11 @@ void initBURTC(void)
   BURTC_CounterReset();
   if(BURAM->RET[1].REG == 1)
     {
-      burtc_irq_period = 20000;
+      burtc_irq_period = 70000;
     }
   else if(BURAM->RET[1].REG == 0)
     {
-      burtc_irq_period = 9000;
+      burtc_irq_period = 5000;
     }
   BURTC_CompareSet(0, burtc_irq_period);
 
@@ -495,10 +489,12 @@ void initBURTC(void)
  *****************************************************************************/
 void BURTC_IRQHandler(void)
 {
+  em4_wakeup_counter++;
   //DEBUG_PRINT_MAX("\r\nBURTC_IRQHandler()\n");
   BURTC_IntClear(BURTC_IF_COMP); // clear any pending interrupt flags
   BURTC_CounterReset(); // reset BURTC counter to wait burtc_irq_period sec before EM4 wakeup
   //DEBUG_PRINT_MAX("-- BURTC counter reset \r\n");
+
 }
 
 /**************************************************************************//**
